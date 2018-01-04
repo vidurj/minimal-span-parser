@@ -34,23 +34,6 @@ def format_elapsed(start_time):
     return elapsed_string
 
 
-def findWordIndex(words, splits):
-    print(words, splits)
-    word_indices = []
-    assert len(' '.join(words)) >= max(splits)
-    for word_index, word in enumerate(words):
-        if splits[0] <= 0:
-            assert splits[0] == 0, splits[0]
-            del splits[0]
-            word_indices.append(word_index)
-            if len(splits) == 0:
-                return word_indices
-        else:
-            splits[0] -= len(word) + 1
-            print(word)
-    raise Exception("foo")
-
-
 def package(labels, file_name, append=False):
     mode = "a+" if append else "w"
     strings = []
