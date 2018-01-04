@@ -18,20 +18,6 @@ STOP = "<STOP>"
 UNK = "<UNK>"
 
 
-def augment(scores, oracle_index):
-    assert isinstance(scores, dy.Expression)
-    shape = scores.dim()[0]
-    assert len(shape) == 1
-    increment = np.ones(shape)
-    increment[oracle_index] = 0
-    return scores + dy.inputVector(increment)
-
-
-def check_overlap(span_a, span_b):
-    return span_a[0] < span_b[0] < span_a[1] < span_b[1] or \
-           span_b[0] < span_a[0] < span_b[1] < span_a[1]
-
-
 def resolve_conflicts(chosen_spans):
     for index_a, (start_a, end_a, on_score_a, off_score_a, _) in enumerate(chosen_spans):
         for index_b, (start_b, end_b, on_score_b, off_score_b, _) in list(

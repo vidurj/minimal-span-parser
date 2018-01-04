@@ -18,8 +18,9 @@ from trees import InternalParseNode, LeafParseNode, ParseNode
 split_nt = namedtuple("split", ["left", "right", "oracle_split"])
 label_nt = namedtuple("label", ["left", "right", "oracle_label_index"])
 
-def check_overlap(spanA, spanB):
-    return spanA[0] < spanB[0] < spanA[1] < spanB[1] or spanB[0] < spanA[0] < spanB[1] < spanA[1]
+def check_overlap(span_a, span_b):
+    return span_a[0] < span_b[0] < span_a[1] < span_b[1] or \
+           span_b[0] < span_a[0] < span_b[1] < span_a[1]
 
 
 
