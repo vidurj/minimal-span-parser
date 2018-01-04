@@ -319,33 +319,19 @@ def load_or_create_model(args, parses_for_vocab):
 
         print("Initializing model...")
         model = dy.ParameterCollection()
-        if args.parser_type == "top-down":
-            parser = parse.TopDownParser(
-                model,
-                tag_vocab,
-                word_vocab,
-                label_vocab,
-                args.tag_embedding_dim,
-                args.word_embedding_dim,
-                args.lstm_layers,
-                args.lstm_dim,
-                args.label_hidden_dim,
-                args.split_hidden_dim,
-                args.dropout
-            )
-        else:
-            parser = parse.ChartParser(
-                model,
-                tag_vocab,
-                word_vocab,
-                label_vocab,
-                args.tag_embedding_dim,
-                args.word_embedding_dim,
-                args.lstm_layers,
-                args.lstm_dim,
-                args.label_hidden_dim,
-                args.dropout,
-            )
+        parser = parse.TopDownParser(
+            model,
+            tag_vocab,
+            word_vocab,
+            label_vocab,
+            args.tag_embedding_dim,
+            args.word_embedding_dim,
+            args.lstm_layers,
+            args.lstm_dim,
+            args.label_hidden_dim,
+            args.split_hidden_dim,
+            args.dropout
+        )
     return parser, model
 
 
@@ -641,10 +627,7 @@ def run_train(args):
                     tree = random.choice(subtrees)
                     tree.reset(0)
                 sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-                if args.parser_type == "top-down":
-                    _, loss = parser.span_parser(sentence, tree)
-                else:
-                    _, loss = parser.span_parser(sentence, tree)
+                _, loss = parser.span_parser(sentence, tree)
                 batch_losses.append(loss)
                 total_processed += 1
                 current_processed += 1
@@ -770,7 +753,6 @@ def main():
     for arg in dynet_args:
         subparser.add_argument(arg)
     subparser.add_argument("--numpy-seed", type=int)
-    subparser.add_argument("--parser-type", choices=["top-down", "chart"], required=True)
     subparser.add_argument("--tag-embedding-dim", type=int, default=50)
     subparser.add_argument("--word-embedding-dim", type=int, default=100)
     subparser.add_argument("--lstm-layers", type=int, default=2)
@@ -831,7 +813,6 @@ def main():
     subparser.add_argument("--batch-size", type=int, default=10)
 
     subparser.add_argument("--numpy-seed", type=int)
-    subparser.add_argument("--parser-type", choices=["top-down", "chart"], required=True)
     subparser.add_argument("--tag-embedding-dim", type=int, default=50)
     subparser.add_argument("--word-embedding-dim", type=int, default=100)
     subparser.add_argument("--lstm-layers", type=int, default=2)
@@ -860,7 +841,6 @@ def main():
     subparser.add_argument("--file-path", required=True)
 
     subparser.add_argument("--numpy-seed", type=int)
-    subparser.add_argument("--parser-type", choices=["top-down", "chart"], default="top-down")
     subparser.add_argument("--tag-embedding-dim", type=int, default=50)
     subparser.add_argument("--word-embedding-dim", type=int, default=100)
     subparser.add_argument("--lstm-layers", type=int, default=2)
