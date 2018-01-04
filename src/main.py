@@ -264,9 +264,12 @@ def collect_random_constituents(args):
 
 
 def load_or_create_model(args, parses_for_vocab):
-    path = args.model_path_base.split('/')
-    relevant_files = [file for file in os.listdir('/'.join(path[:-1])) if
-                      file.startswith(path[-1])]
+    components = args.model_path_base.split('/')
+    dir = '/'.join(components[:-1])
+    if os.path.isdir(dir):
+        relevant_files = [file for file in os.listdir(dir) if file.startswith(components[-1])]
+    else:
+        relevant_files = []
     assert len(relevant_files) <= 2, "Multiple possibilities {}".format(relevant_files)
     if len(relevant_files) > 0:
         print("Loading model from {}...".format(args.model_path_base))
