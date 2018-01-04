@@ -72,8 +72,6 @@ def parse_sentences(args):
                 tokens.append((tag, token.text.replace('(', 'LRB').replace(')', 'RRB')))
         parse, _ = parser.span_parser(tokens)
         parse = parse.convert().linearize()
-        # print(parse)
-        # print("*")
         parses.append(parse)
     with open('parses.txt', 'w') as f:
         f.write('\n'.join(parses))
@@ -82,12 +80,26 @@ def parse_sentences(args):
 def run_span_picking(args):
     parser, _ = load_or_create_model(args, parses_for_vocab=None)
     parses = load_parses(args.trees_path)
-    pick_spans_for_annotations(args.annotation_type, parser, parses, args.expt_name,
-                               append_to_file_path=None, fraction=1, seen=dict())
+    pick_spans_for_annotations(args.annotation_type,
+                               parser,
+                               parses,
+                               args.expt_name,
+                               append_to_file_path=None,
+                               fraction=1,
+                               num_low_conf= 10 ** 8,
+                               low_conf_cutoff=args.low_conf_cutoff,
+                               high_conf_cutoff=args.high_conf_cutoff)
 
 
-def pick_spans_for_annotations(annotation_type, parser, parses, expt_name, append_to_file_path,
-                               fraction, seen, num_low_conf=0):
+def pick_spans_for_annotations(annotation_type,
+                               parser,
+                               parses,
+                               expt_name,
+                               append_to_file_path,
+                               fraction,
+                               num_low_conf,
+                               low_conf_cutoff=0.005,
+                               high_conf_cutoff=0.0001):
     if not os.path.exists(expt_name):
         os.mkdir(expt_name)
 
@@ -113,7 +125,8 @@ def pick_spans_for_annotations(annotation_type, parser, parses, expt_name, appen
                                                                                   sentence_number,
                                                                                   gold,
                                                                                   collect_incorrect_spans,
-                                                                                  seen.get(sentence_number, set()))
+                                                                                  low_conf_cutoff,
+                                                                                  high_conf_cutoff)
         low_confidence_labels.extend(_low_confidence)
         high_confidence_labels.extend(_high_confidence)
         if sentence_number == 0:
@@ -229,7 +242,6 @@ def get_all_spans(parse):
     sentence = list(parse.leaves)
     parses = [parse]
     span_to_gold_label = {}
-    constituents = []
     while len(parses) > 0:
         tree = parses.pop()
         if isinstance(tree, LeafParseNode):
@@ -253,22 +265,22 @@ def collect_random_constituents(args):
             print(sentence_number)
         span_to_gold_label = get_all_spans(parse)
         for (left, right), label in span_to_gold_label.items():
-            datapoint = [str(sentence_number),
+            data_point = [str(sentence_number),
                          str(left),
                          str(right),
                          "NA",
                          "NA",
                          " ".join(label)]
-            annotations.append(" ".join(datapoint))
+            annotations.append(" ".join(data_point))
     with open(os.path.join(args.parses.split(".")[0] + "_constituents.txt"), "w") as f:
         f.write("\n".join(annotations) + "\n")
 
 
 def load_or_create_model(args, parses_for_vocab):
     components = args.model_path_base.split('/')
-    dir = '/'.join(components[:-1])
-    if os.path.isdir(dir):
-        relevant_files = [file for file in os.listdir(dir) if file.startswith(components[-1])]
+    directory = '/'.join(components[:-1])
+    if os.path.isdir(directory):
+        relevant_files = [f for f in os.listdir(directory) if f.startswith(components[-1])]
     else:
         relevant_files = []
     assert len(relevant_files) <= 2, "Multiple possibilities {}".format(relevant_files)
@@ -440,14 +452,14 @@ def run_training_on_spans(args):
 
     total_batch_loss = prev_total_batch_loss = None
     active_learning_parses = load_parses(os.path.join(args.expt_name, "active_learning.trees"))
-    annotated_sentence_number_and_sentence, annotated_sentence_number_to_annotations = load_training_spans(args, parser)
-    all_sentence_number_and_sentence = train_sentence_number_and_sentence + annotated_sentence_number_and_sentence
-    train_sentence_number_to_annotations.update(annotated_sentence_number_to_annotations)
-    all_sentence_number_to_annotations = train_sentence_number_to_annotations
+    if args.annotation_type == "none":
+        annotated_sentence_number_and_sentence, annotated_sentence_number_to_annotations = load_training_spans(args, parser)
+        all_sentence_number_and_sentence = train_sentence_number_and_sentence + annotated_sentence_number_and_sentence
+        train_sentence_number_to_annotations.update(annotated_sentence_number_to_annotations)
+        all_sentence_number_to_annotations = train_sentence_number_to_annotations
     return_code = os.system('echo "test"')
     assert return_code == 0
     for epoch in itertools.count(start=1):
-
         if args.epochs is not None and epoch > args.epochs:
             break
         if epoch > 1:
@@ -470,7 +482,6 @@ def run_training_on_spans(args):
                                        args.expt_name,
                                        os.path.join(args.expt_name, "span_labels.txt"),
                                        fraction=0.1,
-                                       seen=dict(),
                                        num_low_conf=args.num_low_conf)
             annotated_sentence_number_and_sentence, annotated_sentence_number_to_annotations = \
                 load_training_spans(args, parser)
@@ -480,58 +491,59 @@ def run_training_on_spans(args):
             prev_total_batch_loss = None
         else:
             prev_total_batch_loss = total_batch_loss
-        np.random.shuffle(all_sentence_number_and_sentence)
-        epoch_start_time = time.time()
-        annotation_index = 0
-        batch_number = 0
-        total_batch_loss = 0
-        num_trees = len(all_sentence_number_and_sentence)
-        print("Number of trees involved", num_trees)
-        while annotation_index < num_trees - args.batch_size:
-            dy.renew_cg()
-            batch_losses = []
+        for _ in range(3):
+            np.random.shuffle(all_sentence_number_and_sentence)
+            epoch_start_time = time.time()
+            annotation_index = 0
+            batch_number = 0
+            total_batch_loss = 0
+            num_trees = len(all_sentence_number_and_sentence)
+            print("Number of trees involved", num_trees)
+            while annotation_index < num_trees - args.batch_size:
+                dy.renew_cg()
+                batch_losses = []
 
-            for _ in range(args.batch_size):
-                sentence_number, sentence = all_sentence_number_and_sentence[annotation_index]
-                annotation_index += 1
-                if args.make_trees:
-                    loss = parser.train_on_partial_annotation_make_trees(
-                        sentence,
-                        all_sentence_number_to_annotations[sentence_number]
+                for _ in range(args.batch_size):
+                    sentence_number, sentence = all_sentence_number_and_sentence[annotation_index]
+                    annotation_index += 1
+                    if args.make_trees:
+                        loss = parser.train_on_partial_annotation_make_trees(
+                            sentence,
+                            all_sentence_number_to_annotations[sentence_number]
+                        )
+                    else:
+                        loss = parser.train_on_partial_annotation(
+                            sentence,
+                            all_sentence_number_to_annotations[sentence_number]
+                        )
+                    batch_losses.append(loss)
+                    total_processed += 1
+                    current_processed += 1
+
+
+                batch_loss = dy.average(batch_losses)
+                batch_loss_value = batch_loss.scalar_value()
+                total_batch_loss += batch_loss_value
+                batch_loss.backward()
+                trainer.update()
+                batch_number += 1
+
+                print(
+                    "epoch {:,} "
+                    "batch {:,}/{:,} "
+                    "processed {:,} "
+                    "batch-loss {:.4f} "
+                    "epoch-elapsed {} "
+                    "total-elapsed {}".format(
+                        epoch,
+                        batch_number,
+                        int(np.ceil(num_trees / args.batch_size)),
+                        total_processed,
+                        batch_loss_value,
+                        format_elapsed(epoch_start_time),
+                        format_elapsed(start_time),
                     )
-                else:
-                    loss = parser.train_on_partial_annotation(
-                        sentence,
-                        all_sentence_number_to_annotations[sentence_number]
-                    )
-                batch_losses.append(loss)
-                total_processed += 1
-                current_processed += 1
-
-
-            batch_loss = dy.average(batch_losses)
-            batch_loss_value = batch_loss.scalar_value()
-            total_batch_loss += batch_loss_value
-            batch_loss.backward()
-            trainer.update()
-            batch_number += 1
-
-            print(
-                "epoch {:,} "
-                "batch {:,}/{:,} "
-                "processed {:,} "
-                "batch-loss {:.4f} "
-                "epoch-elapsed {} "
-                "total-elapsed {}".format(
-                    epoch,
-                    batch_number,
-                    int(np.ceil(num_trees / args.batch_size)),
-                    total_processed,
-                    batch_loss_value,
-                    format_elapsed(epoch_start_time),
-                    format_elapsed(start_time),
                 )
-            )
 
 
 def run_train(args):
@@ -803,6 +815,8 @@ def main():
                            choices=["random-spans", "incorrect-spans", "uncertainty"],
                            required=True)
     subparser.add_argument("--expt-name", required=True)
+    subparser.add_argument("--low-conf-cutoff", default=0.005, type=float)
+    subparser.add_argument("--high-conf-cutoff", default=0.0001, type=float)
 
     subparser = subparsers.add_parser("active-learning")
     subparser.set_defaults(callback=run_training_on_spans)

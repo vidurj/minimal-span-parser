@@ -243,8 +243,8 @@ class TopDownParser(object):
                                        sentence_number,
                                        gold,
                                        use_oracle,
-                                       low_conf_cutoff=0.005,
-                                       high_conf_cutoff=0.0001):
+                                       low_conf_cutoff,
+                                       high_conf_cutoff):
         lstm_outputs = self._featurize_sentence(sentence, is_train=False)
         encodings = []
         spans = get_all_spans(gold).keys()
@@ -273,7 +273,7 @@ class TopDownParser(object):
             )
             if use_oracle:
                 oracle_label_index = self.label_vocab.index(oracle_label)
-                if oracle_label_index != predicted_label_index:
+                if oracle_label_index != predicted_label_index and distribution[oracle_label_index] > 0.01:
                     low_confidence_labels.append(annotation_request)
             elif low_conf_cutoff < entropy:
                 low_confidence_labels.append(annotation_request)
