@@ -3,7 +3,7 @@ import functools
 import dynet as dy
 import numpy as np
 import math
-import trees
+from trees import LeafParseNode, InternalParseNode, ParseNode
 from pulp import *
 from main import label_nt
 from trees import InternalParseNode, LeafParseNode
@@ -53,9 +53,9 @@ def optimal_parser(label_log_probabilities,
 
         if right - left == 1:
             tag, word = sentence[left]
-            tree = trees.LeafParseNode(left, tag, word)
+            tree = LeafParseNode(left, tag, word)
             if label:
-                tree = trees.InternalParseNode(label, [tree])
+                tree = InternalParseNode(label, [tree])
             return [tree]
 
         argmax_split = left + 1
@@ -68,7 +68,7 @@ def optimal_parser(label_log_probabilities,
         right_trees = construct_trees_from_spans(argmax_split, right, chosen_spans)
         children = left_trees + right_trees
         if label:
-            children = [trees.InternalParseNode(label, children)]
+            children = [InternalParseNode(label, children)]
         return children
 
     def choose_consistent_spans():
@@ -283,7 +283,7 @@ class TopDownParser(object):
 
     def span_parser(self, sentence, gold=None, is_train=None, optimal=True):
         if gold is not None:
-            assert isinstance(gold, trees.ParseNode)
+            assert isinstance(gold, ParseNode)
         if is_train is None and gold is not None:
             is_train = True
 
