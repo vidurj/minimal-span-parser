@@ -112,6 +112,7 @@ def pick_spans_for_annotations(annotation_type,
 
     low_confidence_labels = []
     high_confidence_labels = []
+    incorrect_high_confidence_count = 0
     for sentence_number, gold in enumerate(parses):
         if random.random() > fraction:
             continue
@@ -127,6 +128,10 @@ def pick_spans_for_annotations(annotation_type,
                                                                                   collect_incorrect_spans,
                                                                                   low_conf_cutoff,
                                                                                   high_conf_cutoff)
+        for label in _high_confidence:
+            oracle_label = gold.oracle_label(label.left, label.right)
+            oracle_label_index = parser.label_vocab.index(oracle_label)
+            incorrect_high_confidence_count += oracle_label_index != label.oracle_label_index
         low_confidence_labels.extend(_low_confidence)
         high_confidence_labels.extend(_high_confidence)
         if sentence_number == 0:
@@ -134,11 +139,20 @@ def pick_spans_for_annotations(annotation_type,
 
     low_confidence_labels.sort(key=lambda x: - x["entropy"])
     high_confidence_labels.sort(key=lambda x: x["entropy"])
+    stats_file_path = os.path.join(expt_name, 'stats.txt')
     timestr = time.strftime("%Y%m%d-%H%M%S")
+    with open(stats_file_path, 'a') as f:
+        line = '{} of {} ({}%) high confidence labels are incorrect at {}.'.format(
+            incorrect_high_confidence_count,
+            len(high_confidence_labels),
+            incorrect_high_confidence_count / float(len(high_confidence_labels)),
+            timestr)
+        f.write(line)
     package(low_confidence_labels, os.path.join(expt_name, timestr + "-low_confidence_labels.txt"))
     package(high_confidence_labels, os.path.join(expt_name, timestr + "-high_confidence_labels.txt"))
     if append_to_file_path is not None:
         package(low_confidence_labels[:int(num_low_conf)], append_to_file_path, append=True)
+        package(high_confidence_labels, append_to_file_path, append=True)
 
 
 def load_training_spans(args, parser):
@@ -481,8 +495,10 @@ def run_training_on_spans(args):
             pick_spans_for_annotations(args.annotation_type, parser, active_learning_parses,
                                        args.expt_name,
                                        os.path.join(args.expt_name, "span_labels.txt"),
-                                       fraction=0.1,
-                                       num_low_conf=args.num_low_conf)
+                                       fraction=0.03333,
+                                       num_low_conf=args.num_low_conf,
+                                       low_conf_cutoff=0.01,
+                                       high_conf_cutoff=0.01)
             annotated_sentence_number_and_sentence, annotated_sentence_number_to_annotations = \
                 load_training_spans(args, parser)
             all_sentence_number_and_sentence = train_sentence_number_and_sentence + annotated_sentence_number_and_sentence
