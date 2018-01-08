@@ -275,7 +275,7 @@ class TopDownParser(object):
                 oracle_label_index = self.label_vocab.index(oracle_label)
                 if oracle_label_index != predicted_label_index and distribution[oracle_label_index] > 0.01:
                     low_confidence_labels.append(annotation_request)
-            elif low_conf_cutoff < entropy:
+            elif low_conf_cutoff < entropy and distribution[self.empty_label_index] < 0.2:
                 low_confidence_labels.append(annotation_request)
             if entropy < high_conf_cutoff:
                 high_confidence_labels.append(annotation_request)

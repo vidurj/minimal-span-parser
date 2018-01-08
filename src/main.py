@@ -129,9 +129,8 @@ def pick_spans_for_annotations(annotation_type,
                                                                                   low_conf_cutoff,
                                                                                   high_conf_cutoff)
         for label in _high_confidence:
-            oracle_label = gold.oracle_label(label.left, label.right)
-            oracle_label_index = parser.label_vocab.index(oracle_label)
-            incorrect_high_confidence_count += oracle_label_index != label.oracle_label_index
+            oracle_label = gold.oracle_label(label['left'], label['right'])
+            incorrect_high_confidence_count += oracle_label != label['oracle_label']
         low_confidence_labels.extend(_low_confidence)
         high_confidence_labels.extend(_high_confidence)
         if sentence_number == 0:
@@ -499,10 +498,10 @@ def run_training_on_spans(args):
             pick_spans_for_annotations(args.annotation_type, parser, active_learning_parses,
                                        args.expt_name,
                                        os.path.join(args.expt_name, "span_labels.txt"),
-                                       fraction=0.03333,
+                                       fraction=1.0,
                                        num_low_conf=args.num_low_conf,
-                                       low_conf_cutoff=0.01,
-                                       high_conf_cutoff=0.01)
+                                       low_conf_cutoff=0.05,
+                                       high_conf_cutoff=0.005)
             annotated_sentence_number_and_sentence, annotated_sentence_number_to_annotations = \
                 load_training_spans(args, parser)
             all_sentence_number_and_sentence = train_sentence_number_and_sentence + annotated_sentence_number_and_sentence
@@ -799,8 +798,8 @@ def main():
     subparser.add_argument("--explore", action="store_true")
     subparser.add_argument("--model-path-base", required=True)
     subparser.add_argument("--evalb-dir", default="EVALB/")
-    subparser.add_argument("--train-path", default="data/02-21.10way.clean")
-    subparser.add_argument("--dev-path", default="data/22.auto.clean")
+    subparser.add_argument("--train-path", required=True)
+    subparser.add_argument("--dev-path", required=True)
     subparser.add_argument("--sentences", default="NONE")
     subparser.add_argument("--annotations", default="NONE")
     subparser.add_argument("--batch-size", type=int, default=10)
@@ -859,8 +858,8 @@ def main():
     subparser.add_argument("--split-hidden-dim", type=int, default=250)
     subparser.add_argument("--dropout", type=float, default=0.4)
     subparser.add_argument("--evalb-dir", default="EVALB/")
-    subparser.add_argument("--train-path", default="data/02-21.10way.clean")
-    subparser.add_argument("--dev-path", default="data/22.auto.clean")
+    subparser.add_argument("--train-path", required=True)
+    subparser.add_argument("--dev-path", required=True)
     subparser.add_argument("--epochs", type=int)
     subparser.add_argument("--checks-per-epoch", type=int, default=4)
     subparser.add_argument("--print-vocabs", action="store_true")
@@ -887,8 +886,8 @@ def main():
     subparser.add_argument("--split-hidden-dim", type=int, default=250)
     subparser.add_argument("--dropout", type=float, default=0.4)
     subparser.add_argument("--evalb-dir", default="EVALB/")
-    subparser.add_argument("--train-path", default="data/02-21.10way.clean")
-    subparser.add_argument("--dev-path", default="data/22.auto.clean")
+    subparser.add_argument("--train-path", required=True)
+    subparser.add_argument("--dev-path", required=True)
     subparser.add_argument("--epochs", type=int)
     subparser.add_argument("--checks-per-epoch", type=int, default=4)
     subparser.add_argument("--print-vocabs", action="store_true")
