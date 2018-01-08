@@ -137,8 +137,11 @@ def pick_spans_for_annotations(annotation_type,
         if sentence_number == 0:
             package(low_confidence_labels, os.path.join(expt_name, "test.txt"))
 
-    low_confidence_labels.sort(key=lambda x: - x["entropy"])
-    high_confidence_labels.sort(key=lambda x: x["entropy"])
+    random.shuffle(low_confidence_labels)
+    random.shuffle(high_confidence_labels)
+
+    # low_confidence_labels.sort(key=lambda x: - x["entropy"])
+    # high_confidence_labels.sort(key=lambda x: x["entropy"])
     stats_file_path = os.path.join(expt_name, 'stats.txt')
     timestr = time.strftime("%Y%m%d-%H%M%S")
     with open(stats_file_path, 'a') as f:
@@ -151,8 +154,9 @@ def pick_spans_for_annotations(annotation_type,
     package(low_confidence_labels, os.path.join(expt_name, timestr + "-low_confidence_labels.txt"))
     package(high_confidence_labels, os.path.join(expt_name, timestr + "-high_confidence_labels.txt"))
     if append_to_file_path is not None:
+        num_high_confidence = len(high_confidence_labels) / float(len(low_confidence_labels)) * num_low_conf
         package(low_confidence_labels[:int(num_low_conf)], append_to_file_path, append=True)
-        package(high_confidence_labels, append_to_file_path, append=True)
+        package(high_confidence_labels[:int(num_high_confidence)], append_to_file_path, append=True)
 
 
 def load_training_spans(args, parser):
