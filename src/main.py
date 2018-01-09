@@ -8,12 +8,13 @@ from collections import namedtuple
 
 import dynet as dy
 import numpy as np
-
+from scipy import stats
 import evaluate
 import parse
 import trees
 import vocabulary
 from trees import InternalParseNode, LeafParseNode, ParseNode
+from collections import defaultdict
 
 split_nt = namedtuple("split", ["left", "right", "oracle_split"])
 label_nt = namedtuple("label", ["left", "right", "oracle_label_index"])
@@ -44,7 +45,7 @@ def package(labels, file_name, append=False):
                                                   label["right"],
                                                   label["entropy"],
                                                   label["non_constituent_probability"],
-                                                  " ".join(label["oracle_label"])))
+                                                  " ".join(label["label"])))
     with open(file_name, mode) as f:
         f.write("\n" + "\n".join(strings) + "\n")
 
@@ -84,11 +85,40 @@ def run_span_picking(args):
                                parser,
                                parses,
                                args.expt_name,
+                               seen=set(),
                                append_to_file_path=None,
                                fraction=1,
                                num_low_conf= 10 ** 8,
                                low_conf_cutoff=args.low_conf_cutoff,
                                high_conf_cutoff=args.high_conf_cutoff)
+
+
+def pick_spans(label_options, size, sentence_number_to_on_spans):
+    size = int(size)
+    chosen_spans = []
+    label_options.sort(key=lambda label: label['non_constituent_probability'])
+    for label in label_options:
+        must_be_off = False
+        span = (label['left'], label['right'])
+        sentence_number = label['sentence_number']
+        if sentence_number not in sentence_number_to_on_spans:
+            sentence_number_to_on_spans[sentence_number] = []
+        on_spans = sentence_number_to_on_spans[sentence_number]
+        for on_span in on_spans:
+            if check_overlap(span, on_span):
+                must_be_off = True
+                break
+        if not must_be_off:
+            chosen_spans.append(label)
+            if label['label'] != ():
+                on_spans.append(span)
+            if len(chosen_spans) >= size:
+                break
+    assert len(chosen_spans) == size, (len(chosen_spans), size)
+    return chosen_spans, sentence_number_to_on_spans
+
+
+
 
 
 def pick_spans_for_annotations(annotation_type,
@@ -98,8 +128,9 @@ def pick_spans_for_annotations(annotation_type,
                                append_to_file_path,
                                fraction,
                                num_low_conf,
+                               seen,
                                low_conf_cutoff=0.005,
-                               high_conf_cutoff=0.0001):
+                               pseudo_label_cutoff=2):
     if not os.path.exists(expt_name):
         os.mkdir(expt_name)
 
@@ -112,50 +143,67 @@ def pick_spans_for_annotations(annotation_type,
 
     low_confidence_labels = []
     high_confidence_labels = []
-    incorrect_high_confidence_count = 0
     for sentence_number, gold in enumerate(parses):
         if random.random() > fraction:
             continue
-        if sentence_number % 64 == 0:
+        dy.renew_cg()
+        if sentence_number % 10000 == 0:
             print(sentence_number, len(low_confidence_labels), len(high_confidence_labels))
-            dy.renew_cg()
+
         sentence = [(leaf.tag, leaf.word) for leaf in gold.leaves]
-        print("---")
-        print(sentence_number)
         _low_confidence, _high_confidence = parser.return_spans_and_uncertainties(sentence,
                                                                                   sentence_number,
                                                                                   gold,
                                                                                   collect_incorrect_spans,
                                                                                   low_conf_cutoff,
-                                                                                  high_conf_cutoff)
-        for label in _high_confidence:
-            oracle_label = gold.oracle_label(label['left'], label['right'])
-            incorrect_high_confidence_count += oracle_label != label['oracle_label']
-        low_confidence_labels.extend(_low_confidence)
+                                                                                  pseudo_label_cutoff,
+                                                                                  seen)
+        chosen_labels = []
+        _low_confidence.sort(key=lambda label: - label['entropy'])
+        for label in _low_confidence:
+            overlap = False
+            for chosen_label in chosen_labels:
+                overlap = label['left'] <= chosen_label['left'] <= label['right'] or \
+                          chosen_label['left'] <= label['left'] <= chosen_label['right']
+                if overlap:
+                    break
+            if not overlap:
+                chosen_labels.append(label)
+
+        low_confidence_labels.extend(chosen_labels)
         high_confidence_labels.extend(_high_confidence)
         if sentence_number == 0:
             package(low_confidence_labels, os.path.join(expt_name, "test.txt"))
 
-    random.shuffle(low_confidence_labels)
-    random.shuffle(high_confidence_labels)
-
-    # low_confidence_labels.sort(key=lambda x: - x["entropy"])
-    # high_confidence_labels.sort(key=lambda x: x["entropy"])
     stats_file_path = os.path.join(expt_name, 'stats.txt')
     timestr = time.strftime("%Y%m%d-%H%M%S")
-    with open(stats_file_path, 'a') as f:
-        line = '{} of {} ({}%) high confidence labels are incorrect at {}.'.format(
-            incorrect_high_confidence_count,
-            len(high_confidence_labels),
-            incorrect_high_confidence_count / float(len(high_confidence_labels)),
-            timestr)
-        f.write(line)
     package(low_confidence_labels, os.path.join(expt_name, timestr + "-low_confidence_labels.txt"))
     package(high_confidence_labels, os.path.join(expt_name, timestr + "-high_confidence_labels.txt"))
+    random.shuffle(low_confidence_labels)
+    low_confidence_labels = low_confidence_labels[:int(num_low_conf)]
+    # chosen_low_confidence_labels, sentence_number_to_on_spans = pick_spans(low_confidence_labels, num_low_conf, {})
+    # chosen_high_confidence_labels, _ = pick_spans(high_confidence_labels, num_high_confidence, sentence_number_to_on_spans)
+
+    # incorrect_high_confidence_count = 0
+    # for label in chosen_high_confidence_labels:
+    #     sentence_number = label['sentence_number']
+    #     gold = parses[sentence_number]
+    #     oracle_label = gold.oracle_label(label['left'], label['right'])
+    #     incorrect_high_confidence_count += oracle_label != label['label']
+    #
+    # with open(stats_file_path, 'a') as f:
+    #     line = '{} of {} ({}%) high confidence labels are incorrect at {}. Using {} high confidence and {} low confidence labels.\n'.format(
+    #         incorrect_high_confidence_count,
+    #         len(chosen_high_confidence_labels),
+    #         incorrect_high_confidence_count / max(len(chosen_high_confidence_labels), 1),
+    #         timestr,
+    #     len(chosen_high_confidence_labels),
+    #     len(chosen_low_confidence_labels))
+    #     f.write(line)
     if append_to_file_path is not None:
-        num_high_confidence = len(high_confidence_labels) / float(len(low_confidence_labels)) * num_low_conf
-        package(low_confidence_labels[:int(num_low_conf)], append_to_file_path, append=True)
-        package(high_confidence_labels[:int(num_high_confidence)], append_to_file_path, append=True)
+        low_confidence_labels.sort(key=lambda label: label['sentence_number'])
+        package(low_confidence_labels, append_to_file_path, append=True)
+        # package(chosen_high_confidence_labels, append_to_file_path, append=True)
 
 
 def load_training_spans(args, parser):
@@ -193,12 +241,9 @@ def load_training_spans(args, parser):
             start = annotation.left
             end = annotation.right
             span = (annotation.left, annotation.right)
+            seen_spans.add(span)
             if annotation.oracle_label_index == empty_label_index:
-                seen_spans.add(span)
                 continue
-            else:
-                assert span not in seen_spans
-                seen_spans.add(span)
 
             for illegal_start in range(0, start):
                 for illegal_end in range(start + 1, end):
@@ -375,6 +420,62 @@ def load_parses(file_path):
     return parses
 
 
+def check_parses(args):
+    parses = load_parses(os.path.join(args.expt_name, 'active_learning.trees'))
+    parser, model = load_or_create_model(args, parses)
+    _, sentence_number_to_data = load_training_spans(args, parser)
+    for sentence_number, data in sentence_number_to_data.items():
+        gold = parses[sentence_number]
+        for label in data:
+            oracle_label = gold.oracle_label(label.left, label.right)
+            oracle_label_index = parser.label_vocab.index(oracle_label)
+            if oracle_label_index != label.oracle_label_index:
+                print("*" * 60)
+                print(label)
+                print("*" * 60)
+
+
+def print_dev_perf_by_entropy(dev_parses, matrices, span_to_entropy, parser, expt_name):
+    results = []
+    for sentence_number, gold in enumerate(dev_parses):
+        dy.renew_cg()
+        sentence = [(leaf.tag, leaf.word) for leaf in gold.leaves]
+        label_probabilities = matrices[sentence_number]
+        cur_index = -1
+        for start in range(0, len(sentence)):
+            for end in range(start + 1, len(sentence) + 1):
+                cur_index += 1
+                gold_label = gold.oracle_label(start, end)
+                gold_label_index = parser.label_vocab.index(gold_label)
+                entropy = span_to_entropy[(sentence_number, start, end)]
+                predicted_label_index = np.argmax(label_probabilities[:, cur_index])
+                results.append((entropy, label_probabilities[gold_label_index, cur_index], predicted_label_index == gold_label_index))
+    timestr = time.strftime("%Y%m%d-%H%M%S")
+    results.sort(key=lambda x: x[0])
+    file_path = os.path.join(expt_name, timestr + '-entropy-results.pickle')
+    with open(file_path, 'wb') as f:
+        pickle.dump(results, f)
+
+    num_buckets = 20
+    increment = int(len(results) / num_buckets)
+    output_str = "\n"
+    for i in range(num_buckets):
+        temp = results[:increment]
+        entropies, probabilities, accuracies = zip(*temp)
+        output_str += str(np.mean(entropies)) + ' ' + str(np.mean(probabilities)) + ' ' + str(np.mean(accuracies)) + '\n'
+        results = results[increment:]
+    file_path = os.path.join(expt_name, 'dev_entropy.txt')
+    with open(file_path, 'a+') as f:
+        f.write(output_str)
+
+
+
+
+
+
+
+
+
 def run_training_on_spans(args):
     return_code = os.system('echo "test"')
     assert return_code == 0
@@ -415,6 +516,10 @@ def run_training_on_spans(args):
 
     start_time = time.time()
 
+    span_to_entropy = {}
+
+    dev_parses = [x.convert() for x in dev_treebank]
+
     def check_dev():
         nonlocal best_dev_fscore
         nonlocal best_dev_model_path
@@ -423,12 +528,27 @@ def run_training_on_spans(args):
 
         dev_predicted = []
         # total_loglikelihood = 0
-        for tree in dev_treebank:
+        matrices = []
+        fill_span_to_entropy = len(span_to_entropy) == 0
+        for sentence_number, tree in enumerate(dev_treebank):
             dy.renew_cg()
             sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-            predicted, log_likelihood = parser.span_parser(sentence)
+            predicted, label_probabilities = parser.span_parser(sentence)
+
             # total_loglikelihood += log_likelihood
             dev_predicted.append(predicted.convert())
+            matrices.append(label_probabilities)
+            cur_index = -1
+            if fill_span_to_entropy:
+                for start in range(0, len(sentence)):
+                    for end in range(start + 1, len(sentence) + 1):
+                        cur_index += 1
+                        entropy = stats.entropy(label_probabilities[:, cur_index])
+                        span_to_entropy[(sentence_number, start, end)] = entropy
+                assert cur_index == label_probabilities.shape[1] - 1, (cur_index, label_probabilities.shape)
+
+
+        print_dev_perf_by_entropy(dev_parses, matrices, span_to_entropy, parser, args.expt_name)
 
         if args.erase_labels:
             dev_fscore_without_labels = evaluate.evalb(args.evalb_dir, dev_treebank, dev_predicted,
@@ -474,22 +594,26 @@ def run_training_on_spans(args):
         all_sentence_number_and_sentence = train_sentence_number_and_sentence + annotated_sentence_number_and_sentence
         train_sentence_number_to_annotations.update(annotated_sentence_number_to_annotations)
         all_sentence_number_to_annotations = train_sentence_number_to_annotations
+        # TODO update seen
+    else:
+        seen = set()
     return_code = os.system('echo "test"')
     assert return_code == 0
     for epoch in itertools.count(start=1):
         if args.epochs is not None and epoch > args.epochs:
             break
-        if epoch > 1:
-            is_best, dev_score = check_dev()
-            perf_summary = '\n' + '-' * 40 + '\n' + str(dev_score) + '\n'
-            with open("performance.txt", "a+") as f:
-                f.write(perf_summary)
-            return_code = os.system("date >> performance.txt")
-            assert return_code == 0
-            return_code = os.system(
-                "wc -l {}/span_labels.txt >> performance.txt".format(args.expt_name))
-            assert return_code == 0
-        else:
+
+        is_best, dev_score = check_dev()
+        perf_summary = '\n' + '-' * 40 + '\n' + str(dev_score) + '\n'
+        with open("performance.txt", "a+") as f:
+            f.write(perf_summary)
+        return_code = os.system("date >> performance.txt")
+        assert return_code == 0
+        return_code = os.system(
+            "wc -l {}/span_labels.txt >> performance.txt".format(args.expt_name))
+        assert return_code == 0
+
+        if epoch == 1:
             is_best = False
 
         print("Total batch loss", total_batch_loss, "Prev batch loss", prev_total_batch_loss)
@@ -498,15 +622,20 @@ def run_training_on_spans(args):
             pick_spans_for_annotations(args.annotation_type, parser, active_learning_parses,
                                        args.expt_name,
                                        os.path.join(args.expt_name, "span_labels.txt"),
+                                       seen=seen,
                                        fraction=1.0,
                                        num_low_conf=args.num_low_conf,
-                                       low_conf_cutoff=0.05,
-                                       high_conf_cutoff=0.005)
+                                       low_conf_cutoff=float(args.low_conf_cutoff),
+                                       pseudo_label_cutoff=2)
             annotated_sentence_number_and_sentence, annotated_sentence_number_to_annotations = \
                 load_training_spans(args, parser)
             all_sentence_number_and_sentence = train_sentence_number_and_sentence + annotated_sentence_number_and_sentence
             train_sentence_number_to_annotations.update(annotated_sentence_number_to_annotations)
             all_sentence_number_to_annotations = train_sentence_number_to_annotations
+            for sentence_number, annotations in annotated_sentence_number_to_annotations.items():
+                for label in annotations:
+                    span = (label.left, label.right)
+                    seen.add((span, sentence_number))
             prev_total_batch_loss = None
         else:
             prev_total_batch_loss = total_batch_loss
@@ -588,6 +717,7 @@ def run_train(args):
     best_dev_model_path = None
 
     start_time = time.time()
+
 
     def check_dev():
         nonlocal best_dev_fscore
@@ -718,18 +848,15 @@ def run_test(args):
             print(len(test_predicted))
             dy.renew_cg()
         sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-        predicted, (_log_likelihood, _confusion_matrix, _turned_off) = parser.span_parser(sentence,
-                                                                                          is_train=False,
-                                                                                          gold=tree,
-                                                                                          optimal=args.optimal)
-        total_log_likelihood += _log_likelihood
+        predicted, _ = parser.span_parser(sentence, is_train=False, gold=tree, optimal=args.optimal)
+        # total_log_likelihood += _log_likelihood
         test_predicted.append(predicted.convert())
-        total_turned_off += _turned_off
-        for k, v in _confusion_matrix.items():
-            if k in total_confusion_matrix:
-                total_confusion_matrix[k] += v
-            else:
-                total_confusion_matrix[k] = v
+        # total_turned_off += _turned_off
+        # for k, v in _confusion_matrix.items():
+        #     if k in total_confusion_matrix:
+        #         total_confusion_matrix[k] += v
+        #     else:
+        #         total_confusion_matrix[k] = v
     print("total time", time.time() - start_time)
     print("total loglikelihood", total_log_likelihood)
     print("total turned off", total_turned_off)
@@ -837,6 +964,13 @@ def main():
     subparser.add_argument("--low-conf-cutoff", default=0.005, type=float)
     subparser.add_argument("--high-conf-cutoff", default=0.0001, type=float)
 
+    subparser = subparsers.add_parser("check-labels")
+    subparser.set_defaults(callback=check_parses)
+    for arg in dynet_args:
+        subparser.add_argument(arg)
+    subparser.add_argument("--model-path-base", required=True)
+    subparser.add_argument("--expt-name", required=True)
+
     subparser = subparsers.add_parser("active-learning")
     subparser.set_defaults(callback=run_training_on_spans)
     for arg in dynet_args:
@@ -846,6 +980,7 @@ def main():
                            choices=["random-spans", "incorrect-spans", "uncertainty", "none"],
                            required=True)
     subparser.add_argument("--num-low-conf", default=None, type=int)
+    subparser.add_argument("--low-conf-cutoff", required=True, type=float)
     subparser.add_argument("--expt-name", required=True)
     subparser.add_argument("--batch-size", type=int, default=10)
 

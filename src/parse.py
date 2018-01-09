@@ -229,6 +229,8 @@ class TopDownParser(object):
 
         encodings = []
         for annotation in annotations:
+            assert 0 <= annotation.left < annotation.right <= len(sentence), \
+                (0, annotation.left, annotation.right, len(sentence))
             encoding = self._get_span_encoding(annotation.left, annotation.right, lstm_outputs)
             encodings.append(encoding)
 
@@ -238,16 +240,29 @@ class TopDownParser(object):
             total_loss = total_loss - label_log_probabilities[annotation.oracle_label_index][index]
         return total_loss
 
+    # def parse_top_fraction(self, sentence, fraction):
+    #     stm_outputs = self._featurize_sentence(sentence, is_train=True)
+    #
+    #     encodings = []
+    #     for annotation in annotations:
+    #         encoding = self._get_span_encoding(annotation.left, annotation.right, lstm_outputs)
+    #         encodings.append(encoding)
+    #
+    #     label_log_probabilities = self._encodings_to_label_log_probabilities(encodings)
+
     def return_spans_and_uncertainties(self,
                                        sentence,
                                        sentence_number,
                                        gold,
                                        use_oracle,
                                        low_conf_cutoff,
-                                       high_conf_cutoff):
+                                       pseudo_label_cutoff,
+                                       seen):
         lstm_outputs = self._featurize_sentence(sentence, is_train=False)
         encodings = []
-        spans = get_all_spans(gold).keys()
+        spans = [span for span in get_all_spans(gold).keys() if (span, sentence_number) not in seen]
+        if len(spans) == 0:
+            return [], []
         for (start, end) in spans:
             encodings.append(self._get_span_encoding(start, end, lstm_outputs))
         label_scores = self.f_label(dy.concatenate_to_batch(encodings))
@@ -267,18 +282,19 @@ class TopDownParser(object):
                 left=start,
                 right=end,
                 entropy=entropy,
-                non_constituent_probability=distribution[0],
-                oracle_label=oracle_label,
-                predicted_label=predicted_label
+                non_constituent_probability=distribution[0]
             )
             if use_oracle:
                 oracle_label_index = self.label_vocab.index(oracle_label)
                 if oracle_label_index != predicted_label_index and distribution[oracle_label_index] > 0.01:
+                    annotation_request['label'] = oracle_label
                     low_confidence_labels.append(annotation_request)
-            elif low_conf_cutoff < entropy and distribution[self.empty_label_index] < 0.2:
-                low_confidence_labels.append(annotation_request)
-            if entropy < high_conf_cutoff:
+            elif max(distribution) > pseudo_label_cutoff and (distribution[self.empty_label_index] < 0.001 or random.random() < 0.001):
+                annotation_request['label'] = predicted_label
                 high_confidence_labels.append(annotation_request)
+            elif low_conf_cutoff < entropy:
+                annotation_request['label'] = oracle_label
+                low_confidence_labels.append(annotation_request)
         return low_confidence_labels, high_confidence_labels
 
     def span_parser(self, sentence, gold=None, is_train=None, optimal=True):
@@ -313,4 +329,4 @@ class TopDownParser(object):
                                                    self.empty_label_index,
                                                    self.label_vocab,
                                                    gold)
-            return tree, additional_info
+            return tree, dy.exp(label_log_probabilities).npvalue()
