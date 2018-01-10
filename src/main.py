@@ -71,7 +71,7 @@ def parse_sentences(args):
                 print(tag, token.text)
             else:
                 tokens.append((tag, token.text.replace('(', 'LRB').replace(')', 'RRB')))
-        parse, _ = parser.span_parser(tokens)
+        parse, _, _ = parser.span_parser(tokens)
         parse = parse.convert().linearize()
         parses.append(parse)
     with open('parses.txt', 'w') as f:
@@ -81,16 +81,16 @@ def parse_sentences(args):
 def run_span_picking(args):
     parser, _ = load_or_create_model(args, parses_for_vocab=None)
     parses = load_parses(args.trees_path)
-    pick_spans_for_annotations(args.annotation_type,
-                               parser,
-                               parses,
-                               args.expt_name,
-                               seen=set(),
-                               append_to_file_path=None,
-                               fraction=1,
-                               num_low_conf= 10 ** 8,
-                               low_conf_cutoff=args.low_conf_cutoff,
-                               high_conf_cutoff=args.high_conf_cutoff)
+    # pick_spans_for_annotations(args.annotation_type,
+    #                            parser,
+    #                            parses,
+    #                            args.expt_name,
+    #                            seen=set(),
+    #                            append_to_file_path=None,
+    #                            fraction=1,
+    #                            num_low_conf= 10 ** 8,
+    #                            low_conf_cutoff=args.low_conf_cutoff,
+    #                            high_conf_cutoff=args.high_conf_cutoff)
 
 
 def pick_spans(label_options, size, sentence_number_to_on_spans):
@@ -121,43 +121,26 @@ def pick_spans(label_options, size, sentence_number_to_on_spans):
 
 
 
-def pick_spans_for_annotations(annotation_type,
-                               parser,
-                               parses,
+def pick_spans_for_annotations(parser,
+                               sentences_and_spans,
                                expt_name,
                                append_to_file_path,
-                               fraction,
                                num_low_conf,
                                seen,
-                               low_conf_cutoff=0.005,
-                               pseudo_label_cutoff=2):
+                               low_conf_cutoff=0.05):
     if not os.path.exists(expt_name):
         os.mkdir(expt_name)
-
-    if annotation_type == "incorrect-spans":
-        collect_incorrect_spans = True
-        print("Collecting all incorrect spans")
-    else:
-        assert annotation_type == "uncertainty"
-        collect_incorrect_spans = False
-
     low_confidence_labels = []
-    high_confidence_labels = []
-    for sentence_number, gold in enumerate(parses):
-        if random.random() > fraction:
-            continue
-        dy.renew_cg()
+    for sentence_number, (sentence, span_to_gold_label) in enumerate(sentences_and_spans):
         if sentence_number % 10000 == 0:
-            print(sentence_number, len(low_confidence_labels), len(high_confidence_labels))
-
-        sentence = [(leaf.tag, leaf.word) for leaf in gold.leaves]
-        _low_confidence, _high_confidence = parser.return_spans_and_uncertainties(sentence,
-                                                                                  sentence_number,
-                                                                                  gold,
-                                                                                  collect_incorrect_spans,
-                                                                                  low_conf_cutoff,
-                                                                                  pseudo_label_cutoff,
-                                                                                  seen)
+            print(sentence_number, len(low_confidence_labels))
+        if sentence_number % 100 == 0:
+            dy.renew_cg()
+        _low_confidence = parser.aggressive_annotation(sentence,
+                                                       sentence_number,
+                                                       span_to_gold_label,
+                                                       low_conf_cutoff,
+                                                       seen)
         chosen_labels = []
         _low_confidence.sort(key=lambda label: - label['entropy'])
         for label in _low_confidence:
@@ -171,39 +154,16 @@ def pick_spans_for_annotations(annotation_type,
                 chosen_labels.append(label)
 
         low_confidence_labels.extend(chosen_labels)
-        high_confidence_labels.extend(_high_confidence)
         if sentence_number == 0:
             package(low_confidence_labels, os.path.join(expt_name, "test.txt"))
 
-    stats_file_path = os.path.join(expt_name, 'stats.txt')
     timestr = time.strftime("%Y%m%d-%H%M%S")
     package(low_confidence_labels, os.path.join(expt_name, timestr + "-low_confidence_labels.txt"))
-    package(high_confidence_labels, os.path.join(expt_name, timestr + "-high_confidence_labels.txt"))
     random.shuffle(low_confidence_labels)
     low_confidence_labels = low_confidence_labels[:int(num_low_conf)]
-    # chosen_low_confidence_labels, sentence_number_to_on_spans = pick_spans(low_confidence_labels, num_low_conf, {})
-    # chosen_high_confidence_labels, _ = pick_spans(high_confidence_labels, num_high_confidence, sentence_number_to_on_spans)
-
-    # incorrect_high_confidence_count = 0
-    # for label in chosen_high_confidence_labels:
-    #     sentence_number = label['sentence_number']
-    #     gold = parses[sentence_number]
-    #     oracle_label = gold.oracle_label(label['left'], label['right'])
-    #     incorrect_high_confidence_count += oracle_label != label['label']
-    #
-    # with open(stats_file_path, 'a') as f:
-    #     line = '{} of {} ({}%) high confidence labels are incorrect at {}. Using {} high confidence and {} low confidence labels.\n'.format(
-    #         incorrect_high_confidence_count,
-    #         len(chosen_high_confidence_labels),
-    #         incorrect_high_confidence_count / max(len(chosen_high_confidence_labels), 1),
-    #         timestr,
-    #     len(chosen_high_confidence_labels),
-    #     len(chosen_low_confidence_labels))
-    #     f.write(line)
     if append_to_file_path is not None:
         low_confidence_labels.sort(key=lambda label: label['sentence_number'])
         package(low_confidence_labels, append_to_file_path, append=True)
-        # package(chosen_high_confidence_labels, append_to_file_path, append=True)
 
 
 def load_training_spans(args, parser):
@@ -267,6 +227,9 @@ def load_training_spans(args, parser):
 
         sentence_number_to_data[sentence_number] = \
             sentence_number_to_data[sentence_number].union(additional_annotations)
+
+    for k, v in sentence_number_to_data.items():
+        sentence_number_to_data[k] = list(v)
     return annotations_treebank, sentence_number_to_data
 
 
@@ -470,18 +433,14 @@ def print_dev_perf_by_entropy(dev_parses, matrices, span_to_entropy, parser, exp
 
 
 
-
-
-
-
-
-
 def run_training_on_spans(args):
-    return_code = os.system('echo "test"')
+    return_code = os.system('cp -r src {}/'.format(args.expt_name))
     assert return_code == 0
     if args.numpy_seed is not None:
         print("Setting numpy random seed to {}...".format(args.numpy_seed))
         np.random.seed(args.numpy_seed)
+
+
 
     train_parse = load_parses(args.train_path)
 
@@ -533,7 +492,7 @@ def run_training_on_spans(args):
         for sentence_number, tree in enumerate(dev_treebank):
             dy.renew_cg()
             sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-            predicted, label_probabilities = parser.span_parser(sentence)
+            predicted, _, label_probabilities = parser.span_parser(sentence)
 
             # total_loglikelihood += log_likelihood
             dev_predicted.append(predicted.convert())
@@ -589,6 +548,12 @@ def run_training_on_spans(args):
 
     total_batch_loss = prev_total_batch_loss = None
     active_learning_parses = load_parses(os.path.join(args.expt_name, "active_learning.trees"))
+    active_learning_sentences_and_spans = []
+    for parse in active_learning_parses:
+        span_to_gold_label = get_all_spans(parse)
+        sentence = [(leaf.tag, leaf.word) for leaf in parse.leaves]
+        active_learning_sentences_and_spans.append((sentence, span_to_gold_label))
+
     if args.annotation_type == "none":
         annotated_sentence_number_and_sentence, annotated_sentence_number_to_annotations = load_training_spans(args, parser)
         all_sentence_number_and_sentence = train_sentence_number_and_sentence + annotated_sentence_number_and_sentence
@@ -604,29 +569,29 @@ def run_training_on_spans(args):
             break
 
         is_best, dev_score = check_dev()
-        perf_summary = '\n' + '-' * 40 + '\n' + str(dev_score) + '\n'
-        with open("performance.txt", "a+") as f:
-            f.write(perf_summary)
-        return_code = os.system("date >> performance.txt")
-        assert return_code == 0
-        return_code = os.system(
-            "wc -l {}/span_labels.txt >> performance.txt".format(args.expt_name))
-        assert return_code == 0
 
         if epoch == 1:
             is_best = False
+        else:
+            perf_summary = '\n' + '-' * 40 + '\n' + str(dev_score) + '\n'
+            with open("performance.txt", "a+") as f:
+                f.write(perf_summary)
+            return_code = os.system("date >> performance.txt")
+            assert return_code == 0
+            return_code = os.system(
+                "wc -l {}/span_labels.txt >> performance.txt".format(args.expt_name))
+            assert return_code == 0
 
         print("Total batch loss", total_batch_loss, "Prev batch loss", prev_total_batch_loss)
         if args.annotation_type != "none" and not is_best:
             print("Adding more training data")
-            pick_spans_for_annotations(args.annotation_type, parser, active_learning_parses,
+            pick_spans_for_annotations(parser,
+                                       active_learning_sentences_and_spans,
                                        args.expt_name,
                                        os.path.join(args.expt_name, "span_labels.txt"),
                                        seen=seen,
-                                       fraction=1.0,
                                        num_low_conf=args.num_low_conf,
-                                       low_conf_cutoff=float(args.low_conf_cutoff),
-                                       pseudo_label_cutoff=2)
+                                       low_conf_cutoff=float(args.low_conf_cutoff))
             annotated_sentence_number_and_sentence, annotated_sentence_number_to_annotations = \
                 load_training_spans(args, parser)
             all_sentence_number_and_sentence = train_sentence_number_and_sentence + annotated_sentence_number_and_sentence
@@ -729,7 +694,7 @@ def run_train(args):
         for tree in dev_treebank:
             dy.renew_cg()
             sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-            predicted, _ = parser.span_parser(sentence)
+            predicted, _, _ = parser.span_parser(sentence)
             dev_predicted.append(predicted.convert())
 
         if args.erase_labels:
@@ -824,6 +789,82 @@ def run_train(args):
                 check_dev()
 
 
+def compute_kbest_f1(args):
+    start_time = time.time()
+    print("Loading test trees from {}...".format(args.test_path))
+    test_parses = load_parses(args.test_path)
+    print("Loaded {:,} test examples.".format(len(test_parses)))
+
+    print("Loading model from {}...".format(args.model_path_base))
+    model = dy.ParameterCollection()
+    [parser] = dy.load(args.model_path_base, model)
+
+    print("Parsing test sentences...")
+    all_scores = []
+    for index, tree in enumerate(test_parses):
+        if index % 100 == 0:
+            print(index)
+            dy.renew_cg()
+        sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
+        predicted_trees = parser.kbest(sentence, args.num_trees)
+        scores = []
+        for predicted_tree in predicted_trees:
+            test_fscore = evaluate.evalb(args.evalb_dir, [tree.convert()], [predicted_tree.convert()], args=args,
+                                     name="regular")
+            scores.append(test_fscore)
+        best_score = max(scores, key=lambda x: x.fscore)
+        all_scores.append(best_score)
+
+
+    avg_precision = np.mean([x.precision for x in all_scores])
+    avg_recall = np.mean([x.recall for x in all_scores])
+
+
+
+
+    print(
+        "avg-precision {} avg recall {} F1 {}"
+        "test-elapsed {}".format(
+            avg_precision,
+            avg_recall,
+            2 / (1.0 / avg_precision + 1.0 / avg_recall),
+            format_elapsed(start_time),
+        )
+    )
+
+
+
+def produce_parse_forests(args):
+    print("Loading test trees from {}...".format(args.test_path))
+    test_treebank = trees.load_trees(args.test_path)
+    test_parse = [tree.convert() for tree in test_treebank]
+    print("Loaded {:,} test examples.".format(len(test_treebank)))
+
+    print("Loading model from {}...".format(args.model_path_base))
+    model = dy.ParameterCollection()
+    [parser] = dy.load(args.model_path_base, model)
+
+    print("Parsing test sentences...")
+
+    test_predicted = []
+    num_trees_per_parse = []
+    forest_prob_masses = []
+    for tree in test_parse:
+        if len(test_predicted) % 100 == 0:
+            print(len(test_predicted))
+            dy.renew_cg()
+        sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
+        forest, forest_prob_mass = parser.produce_parse_forest(sentence, required_probability_mass=0.9)
+        test_predicted.append(forest)
+        num_trees = np.product([len(options) for options in forest.values()])
+        num_trees_per_parse.append(num_trees)
+        forest_prob_masses.append(forest_prob_mass)
+    print(num_trees_per_parse)
+    print("avg", np.mean(num_trees_per_parse), "median", np.median(num_trees_per_parse))
+    print(forest_prob_masses)
+    print("avg", np.mean(forest_prob_masses), "median", np.median(forest_prob_masses))
+
+
 def run_test(args):
     if not os.path.exists(args.expt_name):
         os.mkdir(args.expt_name)
@@ -843,12 +884,15 @@ def run_test(args):
     total_log_likelihood = 0
     total_confusion_matrix = {}
     total_turned_off = 0
+    ranks = []
     for tree in test_parse:
         if len(test_predicted) % 100 == 0:
             print(len(test_predicted))
             dy.renew_cg()
         sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-        predicted, _ = parser.span_parser(sentence, is_train=False, gold=tree, optimal=args.optimal)
+        predicted, additional_info, _ = parser.span_parser(sentence, is_train=False, gold=tree, optimal=True)
+        rank = additional_info[3]
+        ranks.append(rank)
         # total_log_likelihood += _log_likelihood
         test_predicted.append(predicted.convert())
         # total_turned_off += _turned_off
@@ -861,6 +905,9 @@ def run_test(args):
     print("total loglikelihood", total_log_likelihood)
     print("total turned off", total_turned_off)
     print(total_confusion_matrix)
+
+    print(ranks)
+    print("avg", np.mean(ranks), "median", np.median(ranks))
 
     dev_fscore_without_labels = evaluate.evalb(args.evalb_dir, test_treebank, test_predicted,
                                                args=args,
@@ -945,11 +992,26 @@ def main():
         subparser.add_argument(arg)
     subparser.add_argument("--model-path-base", required=True)
     subparser.add_argument("--evalb-dir", default="EVALB/")
-    subparser.add_argument("--test-path", default="data/23.auto.clean")
-    subparser.add_argument("--separate-left-right", action="store_true")
-    subparser.add_argument("--erase-labels", action="store_true")
+    subparser.add_argument("--test-path", required=True)
     subparser.add_argument("--expt-name", required=True)
-    subparser.add_argument("--optimal", action="store_true")
+
+    subparser = subparsers.add_parser("parse-forest")
+    subparser.set_defaults(callback=produce_parse_forests)
+    for arg in dynet_args:
+        subparser.add_argument(arg)
+    subparser.add_argument("--model-path-base", required=True)
+    subparser.add_argument("--test-path", required=True)
+    subparser.add_argument("--expt-name", required=True)
+
+    subparser = subparsers.add_parser("bestk-test")
+    subparser.set_defaults(callback=compute_kbest_f1)
+    for arg in dynet_args:
+        subparser.add_argument(arg)
+    subparser.add_argument("--evalb-dir", default="EVALB/")
+    subparser.add_argument("--model-path-base", required=True)
+    subparser.add_argument("--test-path", required=True)
+    subparser.add_argument("--expt-name", required=True)
+    subparser.add_argument("--num-trees", required=True, type=int)
 
     subparser = subparsers.add_parser("pick-spans")
     subparser.set_defaults(callback=run_span_picking)

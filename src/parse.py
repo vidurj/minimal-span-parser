@@ -12,6 +12,7 @@ import math
 import random
 import collections
 from main import get_important_spans, get_all_spans
+from sortedcontainers import SortedList
 
 START = "<START>"
 STOP = "<STOP>"
@@ -36,20 +37,18 @@ def resolve_conflicts(chosen_spans):
     return chosen_spans, 0
 
 
-def optimal_parser(label_log_probabilities,
-                   span_to_index,
-                   sentence,
-                   empty_label_index,
-                   label_vocab,
-                   gold=None):
-    def construct_trees_from_spans(left, right, chosen_spans):
-        if (left, right) in chosen_spans:
-            label_index = chosen_spans[(left, right)][4]
-            assert label_index != empty_label_index
+# Does not assume that chosen_spans do not overlap. Throws an error if
+def construct_tree_from_spans(span_to_label, sentence):
+    used = set()
+
+    def helper(left, right):
+        used.add((left, right))
+        if (left, right) in span_to_label:
+            label = span_to_label[(left, right)]
+            assert label != ()
         else:
             assert left != 0 or right != len(sentence)
-            label_index = empty_label_index
-        label = label_vocab.value(label_index)
+            label = ()
 
         if right - left == 1:
             tag, word = sentence[left]
@@ -60,20 +59,34 @@ def optimal_parser(label_log_probabilities,
 
         argmax_split = left + 1
         for split in range(right - 1, left, -1):
-            if (left, split) in chosen_spans:
+            if (left, split) in span_to_label:
                 argmax_split = split
                 break
         assert left < argmax_split < right, (left, argmax_split, right)
-        left_trees = construct_trees_from_spans(left, argmax_split, chosen_spans)
-        right_trees = construct_trees_from_spans(argmax_split, right, chosen_spans)
+        left_trees = helper(left, argmax_split)
+        right_trees = helper(argmax_split, right)
         children = left_trees + right_trees
         if label:
             children = [InternalParseNode(label, children)]
         return children
 
+    trees = helper(0, len(sentence))
+    for span in span_to_label.keys():
+        assert span in used, (span, 'not in used spans')
+    assert len(trees) == 1
+    return trees[0]
+
+
+def optimal_parser(label_log_probabilities,
+                   span_to_index,
+                   sentence,
+                   empty_label_index,
+                   label_vocab,
+                   gold=None):
     def choose_consistent_spans():
         label_log_probabilities_np = label_log_probabilities.npvalue()
         greedily_chosen_spans = []
+        rank = 1
         parse_log_likelihood = 0
         confusion_matrix = collections.defaultdict(int)
         for (start, end), span_index in span_to_index.items():
@@ -88,18 +101,31 @@ def optimal_parser(label_log_probabilities,
                 oracle_label = gold.oracle_label(start, end)
                 oracle_label_index = label_vocab.index(oracle_label)
                 label = label_vocab.value(label_index)
-                parse_log_likelihood += label_log_probabilities_np[oracle_label_index, span_index]
+                oracle_label_log_probability = label_log_probabilities_np[
+                    oracle_label_index, span_index]
+                parse_log_likelihood += oracle_label_log_probability
                 confusion_matrix[(label, oracle_label)] += 1
+                num_options = np.sum(
+                    label_log_probabilities_np[:, span_index] >= oracle_label_log_probability) - 1
+                if num_options > 5:
+                    words = [y for x, y in sentence]
+                    print('-' * 40)
+                    print(oracle_label, num_options)
+                    print(words)
+                    print(words[start: end])
+                    print('-' * 40)
+                if num_options > 0:
+                    rank *= num_options
 
         choices, _ = resolve_conflicts(greedily_chosen_spans)
-        chosen_spans = {}
+        span_to_label = {}
         for choice in choices:
-            chosen_spans[(choice[0], choice[1])] = choice
-        num_spans_forced_off = len(greedily_chosen_spans) - len(chosen_spans)
-        return chosen_spans, (parse_log_likelihood, confusion_matrix, num_spans_forced_off)
+            span_to_label[(choice[0], choice[1])] = label_vocab.value(choice[4])
+        num_spans_forced_off = len(greedily_chosen_spans) - len(span_to_label)
+        return span_to_label, (parse_log_likelihood, confusion_matrix, num_spans_forced_off, rank)
 
-    chosen_spans, additional_info = choose_consistent_spans()
-    trees = construct_trees_from_spans(0, len(sentence), chosen_spans)
+    span_to_label, additional_info = choose_consistent_spans()
+    trees = construct_tree_from_spans(span_to_label, sentence)
     assert len(trees) == 1, len(trees)
     return trees[0], additional_info
 
@@ -225,6 +251,8 @@ class TopDownParser(object):
         return dy.log_softmax(label_scores_reshaped)
 
     def train_on_partial_annotation(self, sentence, annotations):
+        if len(annotations) == 0:
+            return dy.zeros(1)
         lstm_outputs = self._featurize_sentence(sentence, is_train=True)
 
         encodings = []
@@ -236,19 +264,94 @@ class TopDownParser(object):
 
         label_log_probabilities = self._encodings_to_label_log_probabilities(encodings)
         total_loss = dy.zeros(1)
-        for index, annotation in enumerate(annotations):
-            total_loss = total_loss - label_log_probabilities[annotation.oracle_label_index][index]
+        for index, annotation in reversed(list(enumerate(annotations))):
+            loss = - label_log_probabilities[annotation.oracle_label_index][index]
+            # if loss.scalar_value() < 10 ** -5:
+            #     del annotations[index]
+            total_loss = total_loss + loss
         return total_loss
 
-    # def parse_top_fraction(self, sentence, fraction):
-    #     stm_outputs = self._featurize_sentence(sentence, is_train=True)
-    #
-    #     encodings = []
-    #     for annotation in annotations:
-    #         encoding = self._get_span_encoding(annotation.left, annotation.right, lstm_outputs)
-    #         encodings.append(encoding)
-    #
-    #     label_log_probabilities = self._encodings_to_label_log_probabilities(encodings)
+    def kbest(self, sentence, num_trees):
+        # What if I have the topk trees for every subspan, can I compose these to form the topk
+        # trees for the span itself?
+        lstm_outputs = self._featurize_sentence(sentence, is_train=False)
+        encodings = []
+        span_to_index = {}
+        for start in range(0, len(sentence)):
+            for end in range(start + 1, len(sentence) + 1):
+                span_to_index[(start, end)] = len(encodings)
+                encodings.append(self._get_span_encoding(start, end, lstm_outputs))
+
+
+        label_log_probabilities_np = self._encodings_to_label_log_probabilities(encodings).npvalue()
+        sentence_span_index = span_to_index[(0, len(sentence))]
+        label_log_probabilities_np[self.empty_label_index, sentence_span_index] = - 10 ** 8
+        k = 10 * num_trees + 1000
+
+        actions = list(enumerate(label_log_probabilities_np[:, 0]))
+        actions.sort(key=lambda x: - x[1])
+        options = [([action], score) for action, score in actions[:k]]
+        for span_index in range(1, len(span_to_index)):
+            partial_options = options
+            assert len(partial_options) <= k, (len(partial_options), span_index)
+            actions = list(enumerate(label_log_probabilities_np[:, span_index]))
+            actions.sort(key=lambda x: - x[1])
+            options = SortedList(key=lambda x: - x[1])
+            for (action, action_score) in actions:
+                for (continuation, continuation_score) in partial_options:
+                    option = continuation + [action]
+                    option_score = action_score + continuation_score
+                    if len(options) < k:
+                        options.add((option, option_score))
+                    elif options[-1][1] < option_score:
+                        del options[-1]
+                        options.add((option, option_score))
+                    else:
+                        assert len(options) == k, (len(options), span_index)
+                        break
+        trees = []
+        for (label_indices, _) in options:
+            span_to_label = {}
+            for (span, span_index) in span_to_index.items():
+                label_index = label_indices[span_index]
+                if label_index != self.empty_label_index:
+                    span_to_label[span] = self.label_vocab.value(label_index)
+            try:
+                tree = construct_tree_from_spans(span_to_label, sentence)
+                trees.append(tree)
+            except:
+                print('failed!')
+            if len(trees) == num_trees:
+                break
+        print(len(trees), num_trees)
+        return trees
+
+    def produce_parse_forest(self, sentence, required_probability_mass):
+        lstm_outputs = self._featurize_sentence(sentence, is_train=False)
+        encodings = []
+        spans = []
+        for start in range(0, len(sentence)):
+            for end in range(start + 1, len(sentence) + 1):
+                spans.append((start, end))
+                encodings.append(self._get_span_encoding(start, end, lstm_outputs))
+        label_scores = self.f_label(dy.concatenate_to_batch(encodings))
+        label_scores_reshaped = dy.reshape(label_scores,
+                                           (self.label_vocab.size, len(encodings)))
+        label_probabilities_np = dy.softmax(label_scores_reshaped).npvalue()
+        span_to_labels = {}
+        forest_prob_mass = 1
+        for index, span in enumerate(spans):
+            distribution = list(enumerate(label_probabilities_np[:, index]))
+            distribution.sort(key=lambda x: - x[1])
+            total_probability = 0
+            labels = []
+            while total_probability < required_probability_mass:
+                (label_index, probability) = distribution.pop()
+                labels.append(self.label_vocab.values[label_index])
+                total_probability += probability
+            forest_prob_mass *= total_probability
+            span_to_labels[span] = labels
+        return span_to_labels, forest_prob_mass
 
     def return_spans_and_uncertainties(self,
                                        sentence,
@@ -258,11 +361,12 @@ class TopDownParser(object):
                                        low_conf_cutoff,
                                        pseudo_label_cutoff,
                                        seen):
+        spans = [span for span in get_all_spans(gold).keys() if
+                 (span, sentence_number) not in seen]
+        if len(spans) == 0:
+            return []
         lstm_outputs = self._featurize_sentence(sentence, is_train=False)
         encodings = []
-        spans = [span for span in get_all_spans(gold).keys() if (span, sentence_number) not in seen]
-        if len(spans) == 0:
-            return [], []
         for (start, end) in spans:
             encodings.append(self._get_span_encoding(start, end, lstm_outputs))
         label_scores = self.f_label(dy.concatenate_to_batch(encodings))
@@ -286,16 +390,54 @@ class TopDownParser(object):
             )
             if use_oracle:
                 oracle_label_index = self.label_vocab.index(oracle_label)
-                if oracle_label_index != predicted_label_index and distribution[oracle_label_index] > 0.01:
+                if oracle_label_index != predicted_label_index and distribution[
+                    oracle_label_index] > 0.01:
                     annotation_request['label'] = oracle_label
                     low_confidence_labels.append(annotation_request)
-            elif max(distribution) > pseudo_label_cutoff and (distribution[self.empty_label_index] < 0.001 or random.random() < 0.001):
+            elif max(distribution) > pseudo_label_cutoff and (
+                    distribution[self.empty_label_index] < 0.001 or random.random() < 0.001):
                 annotation_request['label'] = predicted_label
                 high_confidence_labels.append(annotation_request)
             elif low_conf_cutoff < entropy:
                 annotation_request['label'] = oracle_label
                 low_confidence_labels.append(annotation_request)
         return low_confidence_labels, high_confidence_labels
+
+    def aggressive_annotation(self,
+                              sentence,
+                              sentence_number,
+                              span_to_gold_label,
+                              low_conf_cutoff,
+                              seen):
+        if len(span_to_gold_label) == 0:
+            return []
+        lstm_outputs = self._featurize_sentence(sentence, is_train=False)
+        encodings = []
+        spans = span_to_gold_label.keys()
+        for (start, end) in spans:
+            encodings.append(self._get_span_encoding(start, end, lstm_outputs))
+        label_scores = self.f_label(dy.concatenate_to_batch(encodings))
+        label_scores_reshaped = dy.reshape(label_scores,
+                                           (self.label_vocab.size, len(encodings)))
+        label_probabilities_np = dy.softmax(label_scores_reshaped).npvalue()
+        low_confidence_labels = []
+        for index, (start, end) in list(enumerate(spans)):
+            distribution = label_probabilities_np[:, index]
+            entropy = stats.entropy(distribution)
+            oracle_label = span_to_gold_label[(start, end)]
+            annotation_request = dict(
+                sentence_number=sentence_number,
+                left=start,
+                right=end,
+                entropy=entropy,
+                non_constituent_probability=distribution[0]
+            )
+            if entropy < 10 ** -4 or (start, end) in seen:
+                del span_to_gold_label[(start, end)]
+            elif low_conf_cutoff < entropy:
+                annotation_request['label'] = oracle_label
+                low_confidence_labels.append(annotation_request)
+        return low_confidence_labels
 
     def span_parser(self, sentence, gold=None, is_train=None, optimal=True):
         if gold is not None:
@@ -329,4 +471,4 @@ class TopDownParser(object):
                                                    self.empty_label_index,
                                                    self.label_vocab,
                                                    gold)
-            return tree, dy.exp(label_log_probabilities).npvalue()
+            return tree, additional_info, dy.exp(label_log_probabilities).npvalue()
