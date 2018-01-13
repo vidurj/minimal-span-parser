@@ -5,7 +5,7 @@ import pickle
 import random
 import time
 from collections import namedtuple
-
+import math
 import dynet as dy
 import numpy as np
 from scipy import stats
@@ -50,6 +50,52 @@ def package(labels, file_name, append=False):
         f.write("\n" + "\n".join(strings) + "\n")
 
 
+def write_seq_to_seq_data(parses_file_name, file_name):
+    def to_str(sentence):
+        return ' '.join([pos + ' ' + word for pos, word, in sentence])
+
+    null_label_str = 'NULL'
+    parses = load_parses(parses_file_name)
+    xes = []
+    yes = []
+    for parse in parses:
+        sentence = [(leaf.tag, leaf.word) for leaf in parse.leaves]
+        subtrees = [parse]
+        seen = set()
+        while len(subtrees) > 0:
+            tree = subtrees.pop()
+            if not isinstance(tree, trees.InternalParseNode):
+                assert isinstance(tree, trees.LeafParseNode), type(tree)
+                continue
+            seen.add((tree.left, tree.right))
+            string = to_str(sentence[: tree.left]) + " [[[ " + to_str(sentence[tree.left : tree.right]) + " ]]] " + to_str(sentence[tree.right :])
+            label_str = ' '.join(tree.label)
+            xes.append(string)
+            yes.append(label_str)
+
+        for start in range(0, len(sentence)):
+            for end in range(start + 1, len(sentence) + 1):
+                if (start, end) in seen:
+                    continue
+                string = to_str(sentence[: start]) + " [[[ " + to_str(sentence[start: end]) + " ]]] " + to_str(sentence[end:])
+                xes.append(string)
+                yes.append(null_label_str)
+
+    with open('xes-' + file_name, 'w') as f:
+        f.write('\n'.join(xes))
+    with open('yes-' + file_name, 'w') as f:
+        f.write('\n'.join(yes))
+
+
+
+
+
+def produce_data_for_seq_to_seq(_):
+    write_seq_to_seq_data('data/train.trees', 'seq2seq-train.txt')
+    write_seq_to_seq_data('data/dev.trees', 'seq2seq-dev.txt')
+    write_seq_to_seq_data('data/test.trees', 'seq2seq-test.txt')
+
+
 def parse_sentences(args):
     import spacy
     nlp = spacy.load('en')
@@ -71,7 +117,7 @@ def parse_sentences(args):
                 print(tag, token.text)
             else:
                 tokens.append((tag, token.text.replace('(', 'LRB').replace(')', 'RRB')))
-        parse, _, _ = parser.span_parser(tokens)
+        parse, _, _ = parser.span_parser(tokens, is_train=False)
         parse = parse.convert().linearize()
         parses.append(parse)
     with open('parses.txt', 'w') as f:
@@ -142,7 +188,7 @@ def pick_spans_for_annotations(parser,
                                                        low_conf_cutoff,
                                                        seen)
         chosen_labels = []
-        _low_confidence.sort(key=lambda label: - label['entropy'])
+        _low_confidence.sort(key=lambda label: - 10 * label['entropy'] + label['non_constituent_probability'])
         for label in _low_confidence:
             overlap = False
             for chosen_label in chosen_labels:
@@ -159,8 +205,14 @@ def pick_spans_for_annotations(parser,
 
     timestr = time.strftime("%Y%m%d-%H%M%S")
     package(low_confidence_labels, os.path.join(expt_name, timestr + "-low_confidence_labels.txt"))
-    random.shuffle(low_confidence_labels)
-    low_confidence_labels = low_confidence_labels[:int(num_low_conf)]
+    scores = np.exp(np.array([5 * annotation['entropy'] for annotation in low_confidence_labels]))
+    scores = scores / np.sum(scores)
+    num_samples = min(num_low_conf, len(low_confidence_labels))
+    low_confidence_labels = np.random.choice(low_confidence_labels,
+                                             size=num_samples,
+                                             replace=False,
+                                             p=scores)
+    low_confidence_labels = low_confidence_labels.tolist()
     if append_to_file_path is not None:
         low_confidence_labels.sort(key=lambda label: label['sentence_number'])
         package(low_confidence_labels, append_to_file_path, append=True)
@@ -412,7 +464,7 @@ def print_dev_perf_by_entropy(dev_parses, matrices, span_to_entropy, parser, exp
                 gold_label_index = parser.label_vocab.index(gold_label)
                 entropy = span_to_entropy[(sentence_number, start, end)]
                 predicted_label_index = np.argmax(label_probabilities[:, cur_index])
-                results.append((entropy, label_probabilities[gold_label_index, cur_index], predicted_label_index == gold_label_index))
+                results.append((entropy, math.log(label_probabilities[gold_label_index, cur_index] + 10 ** -8), predicted_label_index == gold_label_index))
     timestr = time.strftime("%Y%m%d-%H%M%S")
     results.sort(key=lambda x: x[0])
     file_path = os.path.join(expt_name, timestr + '-entropy-results.pickle')
@@ -424,8 +476,8 @@ def print_dev_perf_by_entropy(dev_parses, matrices, span_to_entropy, parser, exp
     output_str = "\n"
     for i in range(num_buckets):
         temp = results[:increment]
-        entropies, probabilities, accuracies = zip(*temp)
-        output_str += str(np.mean(entropies)) + ' ' + str(np.mean(probabilities)) + ' ' + str(np.mean(accuracies)) + '\n'
+        entropies, log_probabilities, accuracies = zip(*temp)
+        output_str += str(np.mean(entropies)) + ' ' + str(np.mean(log_probabilities)) + ' ' + str(np.mean(accuracies)) + '\n'
         results = results[increment:]
     file_path = os.path.join(expt_name, 'dev_entropy.txt')
     with open(file_path, 'a+') as f:
@@ -492,7 +544,7 @@ def run_training_on_spans(args):
         for sentence_number, tree in enumerate(dev_treebank):
             dy.renew_cg()
             sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-            predicted, _, label_probabilities = parser.span_parser(sentence)
+            predicted, _, label_probabilities = parser.span_parser(sentence, is_train=False)
 
             # total_loglikelihood += log_likelihood
             dev_predicted.append(predicted.convert())
@@ -694,7 +746,7 @@ def run_train(args):
         for tree in dev_treebank:
             dy.renew_cg()
             sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-            predicted, _, _ = parser.span_parser(sentence)
+            predicted, _, _ = parser.span_parser(sentence, is_train=False)
             dev_predicted.append(predicted.convert())
 
         if args.erase_labels:
@@ -757,7 +809,7 @@ def run_train(args):
                     tree = random.choice(subtrees)
                     tree.reset(0)
                 sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-                _, loss = parser.span_parser(sentence, tree)
+                _, loss = parser.span_parser(sentence, is_train=True, gold=tree)
                 batch_losses.append(loss)
                 total_processed += 1
                 current_processed += 1
@@ -790,8 +842,9 @@ def run_train(args):
 
 
 def compute_kbest_f1(args):
-    start_time = time.time()
-    print("Loading test trees from {}...".format(args.test_path))
+    sizes = [1, 5, 10, 15, 20, 100, 200, 300, 400, 500]
+    sizes.sort()
+    sizes = [x for x in sizes if x <= args.num_trees]
     test_parses = load_parses(args.test_path)
     print("Loaded {:,} test examples.".format(len(test_parses)))
 
@@ -801,36 +854,115 @@ def compute_kbest_f1(args):
 
     print("Parsing test sentences...")
     all_scores = []
+    predicted_acc = []
+    gold_acc = []
     for index, tree in enumerate(test_parses):
         if index % 100 == 0:
             print(index)
             dy.renew_cg()
         sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-        predicted_trees = parser.kbest(sentence, args.num_trees)
-        scores = []
-        for predicted_tree in predicted_trees:
-            test_fscore = evaluate.evalb(args.evalb_dir, [tree.convert()], [predicted_tree.convert()], args=args,
-                                     name="regular")
-            scores.append(test_fscore)
-        best_score = max(scores, key=lambda x: x.fscore)
-        all_scores.append(best_score)
+        predicted_trees_and_scores = parser.kbest(sentence, args.num_trees)
+        assert len(predicted_trees_and_scores) == args.num_trees, (sentence, len(predicted_trees_and_scores))
+        predicted_trees, scores = zip(*predicted_trees_and_scores)
+        predicted_trees = [tree.convert() for tree in predicted_trees]
+        # predicted, additional_info, _ = parser.span_parser(sentence, is_train=False, gold=tree)
+        gold_treebank_tree = tree.convert()
+        predicted_acc.extend(predicted_trees)
+        gold_acc.extend([gold_treebank_tree for _ in predicted_trees])
+        all_scores.extend(scores)
 
+    evaluate.evalb(args.evalb_dir, gold_acc, predicted_acc, args=args,
+                                 name="bestk")
+    file_path = os.path.join(args.expt_name, 'bestk-output.txt')
+    with open(file_path, 'r') as f:
+        text = f.read().strip().splitlines()
+    flag = False
+    size_to_scores = {}
+    for size in sizes:
+        size_to_scores[size] = []
 
-    avg_precision = np.mean([x.precision for x in all_scores])
-    avg_recall = np.mean([x.recall for x in all_scores])
+    thresholds = [0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
+    thresholds.sort()
+    threshold_to_scores = {}
+    for threshold in thresholds:
+        threshold_to_scores[threshold] = []
+    threshold_to_ks = {}
+    for threshold in threshold_to_scores.keys():
+        threshold_to_ks[threshold] = []
+    buffer = []
+    buffer_probability = 0
+    cur_index = 0
+    for line in text:
+        if line == '============================================================================':
+            if flag:
+                assert buffer == [], len(buffer)
+                break
+            flag = True
+        elif flag:
+            tokens = line.split()
+            matched_brackets, gold_brackets, predicted_brackets = [int(x) for x in tokens[5:8]]
+            precision = matched_brackets / predicted_brackets
+            recall = matched_brackets / gold_brackets
+            if matched_brackets == 0:
+                f1 = 0
+            else:
+                f1 = 2 / (1 / precision + 1 / recall)
+            buffer.append((matched_brackets, gold_brackets, predicted_brackets, f1))
+            probability = math.exp(all_scores[cur_index])
+            cur_index += 1
+            old_buffer_probability = buffer_probability
+            buffer_probability += probability
 
+            best_score = max(buffer, key=lambda x: x[3])
 
+            if len(buffer) in size_to_scores:
+                size_to_scores[len(buffer)].append(best_score)
 
+            for threshold in thresholds:
+                if old_buffer_probability < threshold <= buffer_probability:
+                    threshold_to_scores[threshold].append(best_score)
+                    threshold_to_ks[threshold].append(len(buffer))
 
-    print(
-        "avg-precision {} avg recall {} F1 {}"
-        "test-elapsed {}".format(
-            avg_precision,
-            avg_recall,
-            2 / (1.0 / avg_precision + 1.0 / avg_recall),
-            format_elapsed(start_time),
-        )
-    )
+            # Must be num_trees since we are generating num_trees and we will be out of alignment
+            if len(buffer) == args.num_trees:
+                for threshold in thresholds:
+                    if buffer_probability < threshold:
+                        print(threshold, 'was too high for', args.num_trees, 'trees')
+                        threshold_to_scores[threshold].append(best_score)
+                        threshold_to_ks[threshold].append(len(buffer))
+                buffer = []
+                buffer_probability = 0
+
+    def print_stats(best_scores, name):
+        total_matched_brackets = np.sum([x[0] for x in best_scores])
+        total_gold_brackets = np.sum([x[1] for x in best_scores])
+        total_predicted_brackets = np.sum([x[2] for x in best_scores])
+        complete_match_fraction = np.mean([x == y == z for x, y, z, _ in best_scores])
+        recall = total_matched_brackets / total_gold_brackets
+        precision = total_matched_brackets / total_predicted_brackets
+        f1 = 2 / (1 / precision + 1 / recall)
+        print('precision:', precision,
+              'recall:', recall,
+              'f1:', f1,
+              'complete match fraction:', complete_match_fraction)
+        with open(name + '.pickle', 'wb') as f:
+            pickle.dump(best_scores, f)
+
+    expected_length = len(all_scores) / args.num_trees
+
+    for size in sizes:
+        print(size)
+        assert len(size_to_scores[size]) == expected_length
+        print_stats(size_to_scores[size], 'k_equals_' + str(size))
+        print('-' * 50)
+
+    for probability in threshold_to_scores.keys():
+        print('threshold', probability)
+        assert len(threshold_to_ks[probability]) == expected_length
+        assert len(threshold_to_scores[probability]) == expected_length
+        print('avg k', np.mean(threshold_to_ks[probability]))
+        print_stats(threshold_to_scores[probability], 'probability_mass_' + str(probability))
+        print('-' * 50)
 
 
 
@@ -890,7 +1022,7 @@ def run_test(args):
             print(len(test_predicted))
             dy.renew_cg()
         sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-        predicted, additional_info, _ = parser.span_parser(sentence, is_train=False, gold=tree, optimal=True)
+        predicted, additional_info, _ = parser.span_parser(sentence, is_train=False, gold=tree)
         rank = additional_info[3]
         ranks.append(rank)
         # total_log_likelihood += _log_likelihood
@@ -1002,6 +1134,9 @@ def main():
     subparser.add_argument("--model-path-base", required=True)
     subparser.add_argument("--test-path", required=True)
     subparser.add_argument("--expt-name", required=True)
+
+    subparser = subparsers.add_parser("seq2seq-data")
+    subparser.set_defaults(callback=produce_data_for_seq_to_seq)
 
     subparser = subparsers.add_parser("bestk-test")
     subparser.set_defaults(callback=compute_kbest_f1)
