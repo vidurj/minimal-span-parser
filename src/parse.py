@@ -185,6 +185,7 @@ class TopDownParser(object):
         self.spec.pop("model")
 
         self.model = model.add_subcollection("Parser")
+        self.elmo_weights = self.model.parameters_from_numpy(np.array([ 0.16397782,  0.67511874,  0.02329052]), name='elmo-averaging-weights')
         self.tag_vocab = tag_vocab
         self.word_vocab = word_vocab
         self.label_vocab = label_vocab
@@ -197,20 +198,14 @@ class TopDownParser(object):
 
         self.lstm = dy.BiRNNBuilder(
             lstm_layers,
-            tag_embedding_dim + word_embedding_dim,
+            tag_embedding_dim + word_embedding_dim + 1024,
             2 * lstm_dim,
             self.model,
             dy.VanillaLSTMBuilder)
 
-        self.separate_left_right = True
 
         self.f_label = Feedforward(
             self.model, 2 * lstm_dim, [label_hidden_dim], label_vocab.size)
-        self.f_split_left = Feedforward(
-            self.model, 2 * lstm_dim, [split_hidden_dim], 1)
-        if self.separate_left_right:
-            self.f_split_right = Feedforward(
-                self.model, 2 * lstm_dim, [split_hidden_dim], 1)
 
         self.dropout = dropout
         self.empty_label = ()
@@ -223,7 +218,7 @@ class TopDownParser(object):
     def from_spec(cls, spec, model):
         return cls(model, **spec)
 
-    def _featurize_sentence(self, sentence, is_train):
+    def _featurize_sentence(self, sentence, is_train, elmo_embeddings, cur_word_index):
         if is_train:
             self.lstm.set_dropout(self.dropout)
         else:
@@ -233,10 +228,17 @@ class TopDownParser(object):
             tag_embedding = self.tag_embeddings[self.tag_vocab.index(tag)]
             if word not in (START, STOP):
                 count = self.word_vocab.count(word)
-                if not count or (is_train and np.random.rand() < 1 / (1 + count)):
+                if not count or (is_train and (np.random.rand() < 1 / (1 + count) or np.random.rand() < 0.1)):
                     word = UNK
             word_embedding = self.word_embeddings[self.word_vocab.index(word)]
-            embeddings.append(dy.concatenate([tag_embedding, word_embedding]))
+            if tag == START or tag == STOP:
+                concatenated_embeddings = [tag_embedding, word_embedding, dy.zeros(1024)]
+            else:
+                elmo_weights = dy.parameter(self.elmo_weights)
+                embedding = dy.sum_dim(dy.cmult(elmo_weights, elmo_embeddings[cur_word_index]), [0])
+                concatenated_embeddings = [tag_embedding, word_embedding, embedding]
+                cur_word_index += 1
+            embeddings.append(dy.concatenate(concatenated_embeddings))
         return self.lstm.transduce(embeddings)
 
     def _get_span_encoding(self, left, right, lstm_outputs):
@@ -253,10 +255,10 @@ class TopDownParser(object):
         label_scores_reshaped = dy.reshape(label_scores, (self.label_vocab.size, len(encodings)))
         return dy.log_softmax(label_scores_reshaped)
 
-    def train_on_partial_annotation(self, sentence, annotations):
+    def train_on_partial_annotation(self, sentence, annotations, elmo_vecs, cur_word_index):
         if len(annotations) == 0:
             return dy.zeros(1)
-        lstm_outputs = self._featurize_sentence(sentence, is_train=True)
+        lstm_outputs = self._featurize_sentence(sentence, is_train=True, elmo_embeddings=elmo_vecs, cur_word_index=cur_word_index)
 
         encodings = []
         for annotation in annotations:
@@ -495,11 +497,11 @@ class TopDownParser(object):
 
         return low_confidence_labels#, high_confidence_labels
 
-    def span_parser(self, sentence, is_train, gold=None):
+    def span_parser(self, sentence, is_train, elmo_embeddings, cur_word_index, gold=None):
         if gold is not None:
             assert isinstance(gold, ParseNode)
 
-        lstm_outputs = self._featurize_sentence(sentence, is_train)
+        lstm_outputs = self._featurize_sentence(sentence, is_train, elmo_embeddings, cur_word_index)
 
         encodings = []
         span_to_index = {}

@@ -15,6 +15,8 @@ import trees
 import vocabulary
 from trees import InternalParseNode, LeafParseNode, ParseNode
 from collections import defaultdict
+import h5py
+import json
 
 split_nt = namedtuple("split", ["left", "right", "oracle_split"])
 label_nt = namedtuple("label", ["left", "right", "oracle_label_index"])
@@ -168,7 +170,7 @@ def pick_spans(label_options, size, sentence_number_to_on_spans):
 
 
 def pick_spans_for_annotations(parser,
-                               sentences_and_spans,
+                               sentence_number_sentences_and_spans,
                                expt_name,
                                append_to_file_path,
                                num_low_conf,
@@ -177,11 +179,13 @@ def pick_spans_for_annotations(parser,
     if not os.path.exists(expt_name):
         os.mkdir(expt_name)
     low_confidence_labels = []
-    for sentence_number, (sentence, span_to_gold_label) in enumerate(sentences_and_spans):
-        if sentence_number % 10000 == 0:
+    num_processed = 0
+    for sentence_number, sentence, span_to_gold_label in sentence_number_sentences_and_spans:
+        if num_processed % 10000 == 0:
             print(sentence_number, len(low_confidence_labels))
-        if sentence_number % 100 == 0:
+        if num_processed % 100 == 0:
             dy.renew_cg()
+        num_processed += 1
         _low_confidence = parser.aggressive_annotation(sentence,
                                                        sentence_number,
                                                        span_to_gold_label,
@@ -218,35 +222,31 @@ def pick_spans_for_annotations(parser,
         package(low_confidence_labels, append_to_file_path, append=True)
 
 
-def load_training_spans(args, parser):
+def load_training_spans(args, parser, sentence_number_sentence_and_spans):
     sentence_number_to_data = {}
-    with open(os.path.join(args.expt_name, "span_labels.txt"), "r") as f:
-        labels = f.read().splitlines()
-        for label in labels:
-            if len(label) == 0:
-                continue
-            tokens = label.split()
-            assert len(tokens) >= 5, "*" + label + "*"
-            oracle_label = tuple(tokens[5:])
-            oracle_label_index = parser.label_vocab.index(oracle_label)
-            datapoint = label_nt(left=int(tokens[1]), right=int(tokens[2]),
-                                 oracle_label_index=oracle_label_index)
-            sentence_number = int(tokens[0])
-            if sentence_number in sentence_number_to_data:
-                sentence_number_to_data[sentence_number].add(datapoint)
-            else:
-                sentence_number_to_data[sentence_number] = {datapoint}
-
-    temp = trees.load_trees(os.path.join(args.expt_name, "active_learning.trees"))
-    temp = list(zip(range(len(temp)), temp))
-    annotations_treebank = []
-    for sentence_number, tree in temp:
-        if sentence_number in sentence_number_to_data:
-            sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-            annotations_treebank.append((sentence_number, sentence))
-
+    span_labels_path = os.path.join(args.expt_name, "span_labels.txt")
+    if os.path.exists(span_labels_path):
+        with open(span_labels_path, "r") as f:
+            labels = f.read().splitlines()
+            for label in labels:
+                if len(label) == 0:
+                    continue
+                tokens = label.split()
+                assert len(tokens) >= 5, "*" + label + "*"
+                oracle_label = tuple(tokens[5:])
+                oracle_label_index = parser.label_vocab.index(oracle_label)
+                datapoint = label_nt(left=int(tokens[1]), right=int(tokens[2]),
+                                     oracle_label_index=oracle_label_index)
+                sentence_number = int(tokens[0])
+                if sentence_number in sentence_number_to_data:
+                    sentence_number_to_data[sentence_number].add(datapoint)
+                else:
+                    sentence_number_to_data[sentence_number] = {datapoint}
+    print('loaded annotations for {} sentences'.format(len(sentence_number_to_data)))
     empty_label_index = parser.label_vocab.index(())
-    for sentence_number, sentence in annotations_treebank:
+    for (sentence_number, sentence, _) in sentence_number_sentence_and_spans:
+        if sentence_number not in sentence_number_to_data:
+            continue
         seen_spans = set()
         additional_annotations = []
         for annotation in sentence_number_to_data[sentence_number]:
@@ -282,7 +282,7 @@ def load_training_spans(args, parser):
 
     for k, v in sentence_number_to_data.items():
         sentence_number_to_data[k] = list(v)
-    return annotations_treebank, sentence_number_to_data
+    return sentence_number_to_data
 
 
 def get_important_spans(parse):
@@ -486,6 +486,7 @@ def print_dev_perf_by_entropy(dev_parses, matrices, span_to_entropy, parser, exp
 
 
 def run_training_on_spans(args):
+    assert args.batch_size == 100, args.batch_size
     return_code = os.system('cp -r src {}/'.format(args.expt_name))
     assert return_code == 0
     if args.numpy_seed is not None:
@@ -494,23 +495,33 @@ def run_training_on_spans(args):
 
 
 
-    train_parse = load_parses(args.train_path)
+    all_parses = load_parses(args.train_path)
 
-    parser, model = load_or_create_model(args, train_parse)
+    with open(os.path.join(args.expt_name, "train_tree_indices.txt"), 'r') as f:
+        train_tree_indices = [int(x) for x in f.read().strip().splitlines()]
+    train_tree_indices_set = set(train_tree_indices)
+    print('training on', len(train_tree_indices), 'full trees')
+
+    parser, model = load_or_create_model(args, all_parses)
+
 
     train_sentence_number_to_annotations = {}
-    train_sentence_number_and_sentence = []
-    for sentence_number, parse in enumerate(train_parse):
-        sentence_number = "train_" + str(sentence_number)
-        sentence = [(leaf.tag, leaf.word) for leaf in parse.leaves]
-        train_sentence_number_and_sentence.append((sentence_number, sentence))
+    active_learning_sentences_and_spans = []
+    for sentence_number in range(len(all_parses)):
+        parse = all_parses[sentence_number]
         span_to_gold_label = get_all_spans(parse)
-        data = []
-        for (left, right), oracle_label in span_to_gold_label.items():
-            oracle_label_index = parser.label_vocab.index(oracle_label)
-            data.append(label_nt(left=left, right=right, oracle_label_index=oracle_label_index))
-        train_sentence_number_to_annotations[sentence_number] = data
-    print("Loaded {:,} training examples.".format(len(train_parse)))
+        if sentence_number in train_tree_indices_set:
+            data = []
+            for (left, right), oracle_label in span_to_gold_label.items():
+                oracle_label_index = parser.label_vocab.index(oracle_label)
+                data.append(label_nt(left=left, right=right, oracle_label_index=oracle_label_index))
+            train_sentence_number_to_annotations[sentence_number] = data
+        else:
+            sentence = [(leaf.tag, leaf.word) for leaf in parse.leaves]
+            active_learning_sentences_and_spans.append((sentence_number, sentence, span_to_gold_label))
+
+
+    print("Loaded {:,} training examples.".format(len(train_tree_indices)))
 
     print("Loading development trees from {}...".format(args.dev_path))
     dev_treebank = trees.load_trees(args.dev_path)
@@ -542,9 +553,18 @@ def run_training_on_spans(args):
         matrices = []
         fill_span_to_entropy = len(span_to_entropy) == 0
         for sentence_number, tree in enumerate(dev_treebank):
-            dy.renew_cg()
+            if sentence_number % 100 == 0:
+                dy.renew_cg()
+                cur_word_index = 0
+                batch_number = int(sentence_number / 100)
+                h5f = h5py.File('ptb_elmo_embeddings/dev/batch_{}_embeddings.h5'.format(batch_number), 'r')
+                embedding_array = h5f['embeddings'][:, :, :]
+                elmo_embeddings = dy.inputTensor(embedding_array)
+                h5f.close()
+
             sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-            predicted, _, label_probabilities = parser.span_parser(sentence, is_train=False)
+            predicted, _, label_probabilities = parser.span_parser(sentence, is_train=False, elmo_embeddings=elmo_embeddings, cur_word_index=cur_word_index)
+            cur_word_index += len(sentence)
 
             # total_loglikelihood += log_likelihood
             dev_predicted.append(predicted.convert())
@@ -598,41 +618,44 @@ def run_training_on_spans(args):
         else:
             return False, dev_fscore
 
+    num_batches = 0
     total_batch_loss = prev_total_batch_loss = None
-    active_learning_parses = load_parses(os.path.join(args.expt_name, "active_learning.trees"))
-    active_learning_sentences_and_spans = []
-    for parse in active_learning_parses:
-        span_to_gold_label = get_all_spans(parse)
-        sentence = [(leaf.tag, leaf.word) for leaf in parse.leaves]
-        active_learning_sentences_and_spans.append((sentence, span_to_gold_label))
 
-    if args.annotation_type == "none":
-        annotated_sentence_number_and_sentence, annotated_sentence_number_to_annotations = load_training_spans(args, parser)
-        all_sentence_number_and_sentence = train_sentence_number_and_sentence + annotated_sentence_number_and_sentence
-        train_sentence_number_to_annotations.update(annotated_sentence_number_to_annotations)
-        all_sentence_number_to_annotations = train_sentence_number_to_annotations
-        # TODO update seen
-    else:
-        seen = set()
+
+    annotated_sentence_number_to_annotations = load_training_spans(args, parser, active_learning_sentences_and_spans)
+    train_sentence_number_to_annotations.update(annotated_sentence_number_to_annotations)
+    all_sentence_number_to_annotations = train_sentence_number_to_annotations
+    seen = set()
+    for sentence_number, annotations in annotated_sentence_number_to_annotations.items():
+        for label in annotations:
+            span = (label.left, label.right)
+            seen.add((span, sentence_number))
     return_code = os.system('echo "test"')
     assert return_code == 0
+    batch_numbers = list(range(398))
+    num_trees = len(all_sentence_number_to_annotations)
+    print('num trees', num_trees)
     for epoch in itertools.count(start=1):
         if args.epochs is not None and epoch > args.epochs:
             break
 
-        is_best, dev_score = check_dev()
-
-        if epoch == 1:
-            is_best = False
+        if total_batch_loss is not None and num_batches > 0 and total_batch_loss / num_batches < 3:
+            is_best, dev_score = check_dev()
         else:
+            is_best = True
+            dev_score = None
+
+        if dev_score is not None:
             perf_summary = '\n' + '-' * 40 + '\n' + str(dev_score) + '\n'
             with open("performance.txt", "a+") as f:
                 f.write(perf_summary)
             return_code = os.system("date >> performance.txt")
             assert return_code == 0
-            return_code = os.system(
-                "wc -l {}/span_labels.txt >> performance.txt".format(args.expt_name))
-            assert return_code == 0
+            span_labels_path = os.path.join(args.expt_name, "span_labels.txt")
+            if os.path.exists(span_labels_path):
+                return_code = os.system(
+                    "wc -l {} >> performance.txt".format(span_labels_path))
+                assert return_code == 0
 
         print("Total batch loss", total_batch_loss, "Prev batch loss", prev_total_batch_loss)
         if args.annotation_type != "none" and not is_best:
@@ -644,9 +667,7 @@ def run_training_on_spans(args):
                                        seen=seen,
                                        num_low_conf=args.num_low_conf,
                                        low_conf_cutoff=float(args.low_conf_cutoff))
-            annotated_sentence_number_and_sentence, annotated_sentence_number_to_annotations = \
-                load_training_spans(args, parser)
-            all_sentence_number_and_sentence = train_sentence_number_and_sentence + annotated_sentence_number_and_sentence
+            annotated_sentence_number_to_annotations = load_training_spans(args, parser, active_learning_sentences_and_spans)
             train_sentence_number_to_annotations.update(annotated_sentence_number_to_annotations)
             all_sentence_number_to_annotations = train_sentence_number_to_annotations
             for sentence_number, annotations in annotated_sentence_number_to_annotations.items():
@@ -657,58 +678,67 @@ def run_training_on_spans(args):
         else:
             prev_total_batch_loss = total_batch_loss
         for _ in range(3):
-            np.random.shuffle(all_sentence_number_and_sentence)
+            np.random.shuffle(batch_numbers)
             epoch_start_time = time.time()
             annotation_index = 0
-            batch_number = 0
+            num_batches = 0
             total_batch_loss = 0
-            num_trees = len(all_sentence_number_and_sentence)
-            print("Number of trees involved", num_trees)
-            while annotation_index < num_trees - args.batch_size:
+            for batch_number in batch_numbers:
                 dy.renew_cg()
                 batch_losses = []
+                elmo_embeddings = None
+                cur_word_index = 0
 
-                for _ in range(args.batch_size):
-                    sentence_number, sentence = all_sentence_number_and_sentence[annotation_index]
+                for offset in range(args.batch_size):
+                    sentence_number = batch_number * 100 + offset
+                    tree = all_parses[sentence_number]
+                    if sentence_number not in all_sentence_number_to_annotations:
+                        cur_word_index += len(tree.leaves)
+                        continue
+                    elif elmo_embeddings is None:
+                        h5f = h5py.File('ptb_elmo_embeddings/train/batch_{}_embeddings.h5'.format(
+                            batch_number), 'r')
+                        elmo_embeddings = dy.inputTensor(h5f['embeddings'][:, :, :])
+                        h5f.close()
+
+                    sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
                     annotation_index += 1
-                    if args.make_trees:
-                        loss = parser.train_on_partial_annotation_make_trees(
+                    loss = parser.train_on_partial_annotation(
                             sentence,
-                            all_sentence_number_to_annotations[sentence_number]
-                        )
-                    else:
-                        loss = parser.train_on_partial_annotation(
-                            sentence,
-                            all_sentence_number_to_annotations[sentence_number]
-                        )
+                            all_sentence_number_to_annotations[sentence_number],
+                            elmo_vecs=elmo_embeddings,
+                            cur_word_index=cur_word_index
+                    )
                     batch_losses.append(loss)
                     total_processed += 1
                     current_processed += 1
+                    cur_word_index += len(tree.leaves)
 
+                print("elmo weights", parser.elmo_weights.as_array())
+                if len(batch_losses) > 0:
+                    batch_loss = dy.average(batch_losses)
+                    batch_loss.backward()
+                    trainer.update()
+                    batch_loss_value = batch_loss.scalar_value()
+                    total_batch_loss += batch_loss_value
+                    num_batches += 1
 
-                batch_loss = dy.average(batch_losses)
-                batch_loss_value = batch_loss.scalar_value()
-                total_batch_loss += batch_loss_value
-                batch_loss.backward()
-                trainer.update()
-                batch_number += 1
-
-                print(
-                    "epoch {:,} "
-                    "batch {:,}/{:,} "
-                    "processed {:,} "
-                    "batch-loss {:.4f} "
-                    "epoch-elapsed {} "
-                    "total-elapsed {}".format(
-                        epoch,
-                        batch_number,
-                        int(np.ceil(num_trees / args.batch_size)),
-                        total_processed,
-                        batch_loss_value,
-                        format_elapsed(epoch_start_time),
-                        format_elapsed(start_time),
+                    print(
+                        "epoch {:,} "
+                        "batch {:,}/{:,} "
+                        "processed {:,} "
+                        "batch-loss {:.4f} "
+                        "epoch-elapsed {} "
+                        "total-elapsed {}".format(
+                            epoch,
+                            num_batches,
+                            len(batch_numbers),
+                            total_processed,
+                            batch_loss_value,
+                            format_elapsed(epoch_start_time),
+                            format_elapsed(start_time),
+                        )
                     )
-                )
 
 
 def run_train(args):
@@ -1176,7 +1206,7 @@ def main():
     subparser.add_argument("--annotation-type",
                            choices=["random-spans", "incorrect-spans", "uncertainty", "none"],
                            required=True)
-    subparser.add_argument("--num-low-conf", default=None, type=int)
+    subparser.add_argument("--num-low-conf", required=True, type=int)
     subparser.add_argument("--low-conf-cutoff", required=True, type=float)
     subparser.add_argument("--expt-name", required=True)
     subparser.add_argument("--batch-size", type=int, default=10)
