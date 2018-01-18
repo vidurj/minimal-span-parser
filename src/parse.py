@@ -20,22 +20,37 @@ STOP = "<STOP>"
 UNK = "<UNK>"
 
 
-def resolve_conflicts(chosen_spans):
+def resolve_conflicts_optimaly(chosen_spans):
     for index_a, (start_a, end_a, on_score_a, off_score_a, _) in enumerate(chosen_spans):
         for index_b, (start_b, end_b, on_score_b, off_score_b, _) in list(
                 enumerate(chosen_spans))[index_a + 1:]:
             if start_a < start_b < end_a < end_b or start_b < start_a < end_b < end_a:
                 option_a = chosen_spans[:index_a] + chosen_spans[index_a + 1:]
-                result_a, score_a = resolve_conflicts(option_a)
+                result_a, score_a = resolve_conflicts_optimaly(option_a)
                 score_a += off_score_a + on_score_b
                 option_b = chosen_spans[:index_b] + chosen_spans[index_b + 1:]
-                result_b, score_b = resolve_conflicts(option_b)
+                result_b, score_b = resolve_conflicts_optimaly(option_b)
                 score_b += on_score_a + off_score_b
                 if score_a > score_b:
                     return result_a, score_a
                 else:
                     return result_b, score_b
     return chosen_spans, 0
+
+def resolve_conflicts_greedily(chosen_spans):
+    conflicts_exist = True
+    while conflicts_exist:
+        conflicts_exist = False
+        for index_a, (start_a, end_a, _, off_score_a, _) in enumerate(chosen_spans):
+            for index_b, (start_b, end_b, _, off_score_b, _) in list(enumerate(chosen_spans))[index_a + 1:]:
+                if start_a < start_b < end_a < end_b or start_b < start_a < end_b < end_a:
+                    conflicts_exist = True
+                    if off_score_a < off_score_b:
+                        chosen_spans = chosen_spans[:index_b] + chosen_spans[index_b + 1:]
+                    else:
+                        chosen_spans = chosen_spans[:index_a] + chosen_spans[index_a + 1:]
+                    break
+    return chosen_spans, None
 
 
 # Does not assume that chosen_spans do not overlap. Throws an error if
@@ -105,19 +120,8 @@ def optimal_parser(label_log_probabilities_np,
                     oracle_label_index, span_index]
                 gold_parse_log_likelihood += oracle_label_log_probability
                 confusion_matrix[(label, oracle_label)] += 1
-                num_options = np.sum(
-                    label_log_probabilities_np[:, span_index] >= oracle_label_log_probability) - 1
-                if num_options > 5:
-                    words = [y for x, y in sentence]
-                    # print('-' * 40)
-                    # print(oracle_label, num_options)
-                    # print(words)
-                    # print(words[start: end])
-                    # print('-' * 40)
-                if num_options > 0:
-                    rank *= num_options
 
-        choices, _ = resolve_conflicts(greedily_chosen_spans)
+        choices, _ = resolve_conflicts_greedily(greedily_chosen_spans)
         span_to_label = {}
         predicted_parse_log_likelihood = np.sum(label_log_probabilities_np[empty_label_index, :])
         adjusted = label_log_probabilities_np - label_log_probabilities_np[empty_label_index, :]

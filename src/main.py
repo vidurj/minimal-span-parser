@@ -648,7 +648,7 @@ def run_training_on_spans(args):
         if args.epochs is not None and epoch > args.epochs:
             break
 
-        if total_batch_loss is not None and num_batches > 0 and total_batch_loss / num_batches < 3:
+        if epoch > 1:
             is_best, dev_score = check_dev()
         else:
             is_best = True
@@ -723,8 +723,8 @@ def run_training_on_spans(args):
                     current_processed += 1
                     cur_word_index += len(tree.leaves)
 
-                print("elmo weights", parser.elmo_weights.as_array())
                 if len(batch_losses) > 0:
+                    print("elmo weights", parser.elmo_weights.as_array())
                     batch_loss = dy.average(batch_losses)
                     batch_loss.backward()
                     trainer.update()
