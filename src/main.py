@@ -616,6 +616,15 @@ def run_training_on_spans(args):
             dy.save(best_dev_model_path, [parser])
             return True, dev_fscore
         else:
+            latest_model_path = "{}_latest_model".format(args.model_path_base, dev_fscore.fscore)
+            for ext in [".data", ".meta"]:
+                path = latest_model_path + ext
+                if os.path.exists(path):
+                    print("Removing previous model file {}...".format(path))
+                    os.remove(path)
+
+            print("Saving new model to {}...".format(latest_model_path))
+            dy.save(latest_model_path, [parser])
             return False, dev_fscore
 
     num_batches = 0
@@ -1031,7 +1040,16 @@ def run_test(args):
     if not os.path.exists(args.expt_name):
         os.mkdir(args.expt_name)
     print("Loading test trees from {}...".format(args.test_path))
+    file_name = args.test_path.split('/')[-1]
+    assert file_name.endswith('.trees'), args.test_path
+    file_name = file_name[:-6]
+    assert file_name == 'test' or file_name == 'dev', args.test_path
     test_treebank = trees.load_trees(args.test_path)
+    num_excess_trees = len(test_treebank) % 100
+    if num_excess_trees != 0:
+        print('last {} parses are skipped by current elmo vecs'.format(num_excess_trees))
+        test_treebank = test_treebank[:-num_excess_trees]
+
     test_parse = [tree.convert() for tree in test_treebank]
     print("Loaded {:,} test examples.".format(len(test_treebank)))
 
@@ -1047,12 +1065,21 @@ def run_test(args):
     total_confusion_matrix = {}
     total_turned_off = 0
     ranks = []
-    for tree in test_parse:
-        if len(test_predicted) % 100 == 0:
-            print(len(test_predicted))
+    print('elmo weights', parser.elmo_weights.as_array())
+    for tree_index, tree in enumerate(test_parse):
+        if tree_index % 100 == 0:
             dy.renew_cg()
+            cur_word_index = 0
+            batch_number = int(tree_index / 100)
+            embedding_file_name = 'ptb_elmo_embeddings/{}/batch_{}_embeddings.h5'.format(file_name, batch_number)
+            h5f = h5py.File(embedding_file_name, 'r')
+            embedding_array = h5f['embeddings'][:, :, :]
+            elmo_embeddings = dy.inputTensor(embedding_array)
+            h5f.close()
+            print(tree_index)
         sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-        predicted, additional_info, _ = parser.span_parser(sentence, is_train=False, gold=tree)
+        predicted, additional_info, _ = parser.span_parser(sentence, is_train=False, elmo_embeddings=elmo_embeddings, cur_word_index=cur_word_index, gold=tree)
+        cur_word_index += len(sentence)
         rank = additional_info[3]
         ranks.append(rank)
         # total_log_likelihood += _log_likelihood

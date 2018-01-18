@@ -501,8 +501,9 @@ class TopDownParser(object):
         if gold is not None:
             assert isinstance(gold, ParseNode)
 
-        lstm_outputs = self._featurize_sentence(sentence, is_train, elmo_embeddings, cur_word_index)
-
+        lstm_outputs = self._featurize_sentence(sentence, is_train=is_train,
+                                                elmo_embeddings=elmo_embeddings,
+                                                cur_word_index=cur_word_index)
         encodings = []
         span_to_index = {}
         for start in range(0, len(sentence)):
