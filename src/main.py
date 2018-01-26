@@ -405,11 +405,6 @@ def load_or_create_model(args, parses_for_vocab):
                 sorted(value for value in vocab.values if value in special) +
                 sorted(value for value in vocab.values if value not in special)))
 
-        if args.print_vocabs:
-            print_vocabulary("Tag", tag_vocab)
-            print_vocabulary("Word", word_vocab)
-            print_vocabulary("Label", label_vocab)
-
         print("Initializing model...")
         model = dy.ParameterCollection()
         parser = parse.TopDownParser(
@@ -879,6 +874,189 @@ def run_train(args):
                 current_processed -= check_every
                 check_dev()
 
+
+
+
+def run_test_qbank(args):
+    if not os.path.exists(args.expt_name):
+        os.mkdir(args.expt_name)
+
+    print("Loading model from {}...".format(args.model_path_base))
+    model = dy.ParameterCollection()
+    [parser] = dy.load(args.model_path_base, model)
+
+    test_path = 'questionbank/qbank.{}.trees'.format(args.split)
+    test_treebank = trees.load_trees(test_path)
+    test_embeddings = []
+    with h5py.File('question_bank_elmo_embeddings.hdf5', 'r') as h5f:
+        for index in range(1, len(test_treebank) + 1):
+            test_embeddings.append(h5f[str(len(h5f) - index)][:, :, :])
+
+    test_embeddings =  list(reversed(test_embeddings))
+    test_embeddings_np = np.swapaxes(np.concatenate(test_embeddings, axis=1), axis1=0, axis2=1)
+
+
+    dev_start_time = time.time()
+
+    dev_predicted = []
+    cur_word_index = 0
+    for dev_index, tree in enumerate(test_treebank):
+        if dev_index % 100 == 0:
+            dy.renew_cg()
+            test_embeddings = dy.inputTensor(test_embeddings_np)
+        sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
+        predicted, _, _ = parser.span_parser(sentence, is_train=False,
+                                             elmo_embeddings=test_embeddings,
+                                             cur_word_index=cur_word_index)
+        dev_predicted.append(predicted.convert())
+        cur_word_index += len(sentence)
+
+    dev_fscore = evaluate.evalb(args.evalb_dir, test_treebank, dev_predicted, args=args,
+                                name="dev")
+
+    print(
+        "dev-fscore {} "
+        "dev-elapsed {} ".format(
+            dev_fscore,
+            format_elapsed(dev_start_time),
+        )
+    )
+
+def run_train_question_bank(args):
+    train_path = 'questionbank/qbank.train.trees'
+    dev_path = 'questionbank/qbank.dev.trees'
+    print("Loading training trees from {}...".format(train_path))
+    train_parse = load_parses(train_path)
+    print("Loaded {:,} training examples.".format(len(train_parse)))
+
+    print("Loading development trees from {}...".format(dev_path))
+    dev_treebank = trees.load_trees(dev_path)
+    print("Loaded {:,} development examples.".format(len(dev_treebank)))
+
+    wsj_train = load_parses('data/train.trees')
+
+    parser, model = load_or_create_model(args, train_parse + wsj_train)
+    trainer = dy.AdamTrainer(model)
+
+    total_processed = 0
+    current_processed = 0
+    check_every = len(train_parse)
+    best_dev_fscore = -np.inf
+    best_dev_model_path = None
+
+    start_time = time.time()
+
+    train_embeddings = []
+    dev_embeddings = []
+    with h5py.File('question_bank_elmo_embeddings.hdf5', 'r') as h5f:
+        for index in range(len(train_parse)):
+            train_embeddings.append(h5f[str(index)][:, :, :])
+        for index in range(len(train_parse), len(train_parse) + len(dev_treebank)):
+            dev_embeddings.append(h5f[str(index)][:, :, :])
+
+    train_embeddings_np = np.swapaxes(np.concatenate(train_embeddings, axis=1), axis1=0, axis2=1)
+    dev_embeddings_np = np.swapaxes(np.concatenate(dev_embeddings, axis=1), axis1=0, axis2=1)
+
+
+    def check_dev():
+        nonlocal best_dev_fscore
+        nonlocal best_dev_model_path
+
+        dev_start_time = time.time()
+
+        dev_predicted = []
+        cur_word_index = 0
+        for dev_index, tree in enumerate(dev_treebank):
+            if dev_index % 100 == 0:
+                dy.renew_cg()
+                dev_embeddings = dy.inputTensor(dev_embeddings_np)
+            sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
+            predicted, _, _ = parser.span_parser(sentence, is_train=False, elmo_embeddings=dev_embeddings, cur_word_index=cur_word_index)
+            dev_predicted.append(predicted.convert())
+            cur_word_index += len(sentence)
+
+        dev_fscore = evaluate.evalb(args.evalb_dir, dev_treebank, dev_predicted, args=args,
+                                    name="dev")
+
+        print(
+            "dev-fscore {} "
+            "dev-elapsed {} "
+            "total-elapsed {}".format(
+                dev_fscore,
+                format_elapsed(dev_start_time),
+                format_elapsed(start_time),
+            )
+        )
+
+        if dev_fscore.fscore > best_dev_fscore:
+            if best_dev_model_path is not None:
+                for ext in [".data", ".meta"]:
+                    path = best_dev_model_path + ext
+                    if os.path.exists(path):
+                        print("Removing previous model file {}...".format(path))
+                        os.remove(path)
+
+            best_dev_fscore = dev_fscore.fscore
+            best_dev_model_path = "{}_dev={:.2f}".format(
+                args.model_path_base, dev_fscore.fscore)
+            print("Saving new best model to {}...".format(best_dev_model_path))
+            dy.save(best_dev_model_path, [parser])
+
+
+    sentence_number_to_sentence_and_word_index = {}
+
+    word_index = 0
+    for index, tree in enumerate(train_parse):
+        sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
+        sentence_number_to_sentence_and_word_index[index] = (sentence, word_index)
+        word_index += len(sentence)
+
+
+    for epoch in itertools.count(start=1):
+
+        tree_indices = list(range(len(train_parse)))
+        np.random.shuffle(tree_indices)
+        epoch_start_time = time.time()
+
+        for start_index in range(0, len(train_parse), args.batch_size):
+            dy.renew_cg()
+            train_embeddings = dy.inputTensor(train_embeddings_np)
+            batch_losses = []
+            for index in tree_indices[start_index:start_index + args.batch_size]:
+                tree = train_parse[index]
+                sentence, cur_word_index = sentence_number_to_sentence_and_word_index[index]
+                _, loss = parser.span_parser(sentence, is_train=True, gold=tree, elmo_embeddings=train_embeddings, cur_word_index=cur_word_index)
+                batch_losses.append(loss)
+                total_processed += 1
+                current_processed += 1
+
+            batch_loss = dy.average(batch_losses)
+            batch_loss_value = batch_loss.scalar_value()
+            batch_loss.backward()
+            trainer.update()
+
+            print(
+                "epoch {:,} "
+                "batch {:,}/{:,} "
+                "processed {:,} "
+                "batch-loss {:.4f} "
+                "epoch-elapsed {} "
+                "total-elapsed {}".format(
+                    epoch,
+                    start_index // (args.batch_size + 1),
+                    int(np.ceil(len(train_parse) / (args.batch_size + 1))),
+                    total_processed,
+                    batch_loss_value,
+                    format_elapsed(epoch_start_time),
+                    format_elapsed(start_time),
+                )
+            )
+
+            if current_processed >= check_every:
+                current_processed -= check_every
+                check_dev()
+
+
 def fine_tune_confidence(args):
     dev_parses = load_parses('data/train.trees')
     print("Loaded {:,} test examples.".format(len(dev_parses)))
@@ -1209,6 +1387,24 @@ def main():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers()
 
+
+
+    subparser = subparsers.add_parser("train-question-bank")
+    subparser.set_defaults(callback=run_train_question_bank)
+    for arg in dynet_args:
+        subparser.add_argument(arg)
+    subparser.add_argument("--tag-embedding-dim", type=int, default=50)
+    subparser.add_argument("--word-embedding-dim", type=int, default=100)
+    subparser.add_argument("--lstm-layers", type=int, default=2)
+    subparser.add_argument("--lstm-dim", type=int, default=250)
+    subparser.add_argument("--label-hidden-dim", type=int, default=250)
+    subparser.add_argument("--split-hidden-dim", type=int, default=250)
+    subparser.add_argument("--dropout", type=float, default=0.4)
+    subparser.add_argument("--model-path-base", required=True)
+    subparser.add_argument("--evalb-dir", default="EVALB/")
+    subparser.add_argument("--batch-size", type=int, default=100)
+    subparser.add_argument("--expt-name", required=True)
+
     subparser = subparsers.add_parser("train")
     subparser.set_defaults(callback=run_train)
     for arg in dynet_args:
@@ -1245,6 +1441,15 @@ def main():
     subparser.add_argument("--model-path-base", required=True)
     subparser.add_argument("--evalb-dir", default="EVALB/")
     subparser.add_argument("--test-path", required=True)
+    subparser.add_argument("--expt-name", required=True)
+
+    subparser = subparsers.add_parser("test-qb")
+    subparser.set_defaults(callback=run_test_qbank)
+    for arg in dynet_args:
+        subparser.add_argument(arg)
+    subparser.add_argument("--model-path-base", required=True)
+    subparser.add_argument("--evalb-dir", default="EVALB/")
+    subparser.add_argument("--split", required=True)
     subparser.add_argument("--expt-name", required=True)
 
     subparser = subparsers.add_parser("parse-forest")
