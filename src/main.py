@@ -879,17 +879,71 @@ def run_train(args):
                 current_processed -= check_every
                 check_dev()
 
+def fine_tune_confidence(args):
+    dev_parses = load_parses('data/train.trees')
+    print("Loaded {:,} test examples.".format(len(dev_parses)))
+
+    print("Loading model from {}...".format(args.model_path_base))
+    model = dy.ParameterCollection()
+    lmbd_param_collection = model.add_subcollection("Lambda")
+    [parser] = dy.load(args.model_path_base, model)
+    lmbd_parameter = lmbd_param_collection.add_parameters((1, 1), dy.ConstInitializer(1))
+    trainer = dy.AdamTrainer(lmbd_param_collection)
+    print(trainer.learning_rate)
+    trainer.restart(learning_rate=0.01)
+    print(trainer.learning_rate)
+    print("Parsing test sentences...")
+    while True:
+        for index, tree in enumerate(dev_parses):
+            if index % 100 == 0:
+                dy.renew_cg()
+                lmbd = dy.const_parameter(lmbd_parameter)
+                batch_losses = []
+                cur_word_index = 0
+                batch_number = int(index / 100)
+                embedding_file_name = 'ptb_elmo_embeddings/train/batch_{}_embeddings.h5'.format(batch_number)
+                h5f = h5py.File(embedding_file_name, 'r')
+                embedding_array = h5f['embeddings'][:, :, :]
+                elmo_embeddings = dy.inputTensor(embedding_array)
+                h5f.close()
+                print(index)
+            sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
+            loss = parser.fine_tune_confidence(sentence, lmbd, elmo_embeddings,
+                                                      cur_word_index, tree)
+
+            print(loss.scalar_value())
+            batch_losses.append(loss)
+
+            if index % 100 == 99:
+                batch_loss = dy.average(batch_losses)
+                batch_loss_value = batch_loss.scalar_value()
+                batch_loss.backward()
+                trainer.update()
+                print(batch_loss_value, lmbd_parameter.as_array())
+                print('-' * 40)
+
+
+
 
 def compute_kbest_f1(args):
-    sizes = [1, 5, 10, 15, 20, 100, 200, 300, 400, 500]
+    sizes = [1, 5, 10, 15, 20, 50, 100, 200, 300, 400, 500]
     sizes.sort()
     sizes = [x for x in sizes if x <= args.num_trees]
     test_parses = load_parses(args.test_path)
     print("Loaded {:,} test examples.".format(len(test_parses)))
+    num_excess_trees = len(test_parses) % 100
+    if num_excess_trees != 0:
+        print('last {} parses are skipped by current elmo vecs'.format(num_excess_trees))
+        test_parses = test_parses[:-num_excess_trees]
 
     print("Loading model from {}...".format(args.model_path_base))
     model = dy.ParameterCollection()
     [parser] = dy.load(args.model_path_base, model)
+
+    file_name = args.test_path.split('/')[-1]
+    assert file_name.endswith('.trees'), args.test_path
+    file_name = file_name[:-6]
+    assert file_name == 'test' or file_name == 'dev' or file_name == 'train', args.test_path
 
     print("Parsing test sentences...")
     all_scores = []
@@ -897,10 +951,19 @@ def compute_kbest_f1(args):
     gold_acc = []
     for index, tree in enumerate(test_parses):
         if index % 100 == 0:
-            print(index)
             dy.renew_cg()
+            cur_word_index = 0
+            batch_number = int(index / 100)
+            embedding_file_name = 'ptb_elmo_embeddings/{}/batch_{}_embeddings.h5'.format(file_name,
+                                                                                         batch_number)
+            h5f = h5py.File(embedding_file_name, 'r')
+            embedding_array = h5f['embeddings'][:, :, :]
+            elmo_embeddings = dy.inputTensor(embedding_array)
+            h5f.close()
+            print(index)
         sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-        predicted_trees_and_scores = parser.kbest(sentence, args.num_trees)
+        predicted_trees_and_scores = parser.kbest(sentence, args.num_trees, elmo_embeddings, cur_word_index)
+        cur_word_index += len(sentence)
         assert len(predicted_trees_and_scores) == args.num_trees, (sentence, len(predicted_trees_and_scores))
         predicted_trees, scores = zip(*predicted_trees_and_scores)
         predicted_trees = [tree.convert() for tree in predicted_trees]
@@ -1043,7 +1106,7 @@ def run_test(args):
     file_name = args.test_path.split('/')[-1]
     assert file_name.endswith('.trees'), args.test_path
     file_name = file_name[:-6]
-    assert file_name == 'test' or file_name == 'dev', args.test_path
+    assert file_name == 'test' or file_name == 'dev' or file_name == 'train', args.test_path
     test_treebank = trees.load_trees(args.test_path)
     num_excess_trees = len(test_treebank) % 100
     if num_excess_trees != 0:
@@ -1258,6 +1321,11 @@ def main():
     subparser = subparsers.add_parser("random-constituents")
     subparser.set_defaults(callback=collect_random_constituents)
     subparser.add_argument("--parses", type=str, required=True)
+
+
+    subparser = subparsers.add_parser("fine-tune-confidence")
+    subparser.set_defaults(callback=fine_tune_confidence)
+    subparser.add_argument("--model-path-base", required=True)
 
     subparser = subparsers.add_parser("parse")
     subparser.set_defaults(callback=parse_sentences)
