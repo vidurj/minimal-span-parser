@@ -123,7 +123,7 @@ def optimal_parser(label_log_probabilities_np,
                 gold_parse_log_likelihood += oracle_label_log_probability
                 confusion_matrix[(label, oracle_label)] += 1
 
-        choices, _ = resolve_conflicts_greedily(greedily_chosen_spans)
+        choices, _ = resolve_conflicts_optimaly(greedily_chosen_spans)
         span_to_label = {}
         predicted_parse_log_likelihood = np.sum(label_log_probabilities_np[empty_label_index, :])
         adjusted = label_log_probabilities_np - label_log_probabilities_np[empty_label_index, :]
@@ -263,11 +263,12 @@ class TopDownParser(object):
         label_scores = self.f_label(dy.concatenate_to_batch(encodings))
         label_scores_reshaped = dy.reshape(label_scores, (self.label_vocab.size, len(encodings)))
 
-        if alpha is not None:
-            temp = dy.abs(dy.reshape(alpha[0], (1, 1)))
-            label_scores_reshaped = dy.cmult(dy.logistic(dy.cmult(label_scores_reshaped, temp) + alpha[1]), lmbd) + alpha[2]
-
-        return dy.log_softmax(label_scores_reshaped)
+        # if alpha is not None:
+        #     temp = dy.abs(dy.reshape(alpha[0], (1, 1)))
+        #     label_scores_reshaped = dy.cmult(dy.logistic(dy.cmult(label_scores_reshaped, temp) + alpha[1]), lmbd) + alpha[2]
+        # 990.51641846]] [ 0.03124614  4.00097179 -9.43100834
+        # label_scores_reshaped = dy.logistic(label_scores_reshaped * 0.03124614 + 4.00097179) * 990.51641846 - 9.43100834
+        return dy.log_softmax(0.6 * label_scores_reshaped)
 
     def train_on_partial_annotation(self, sentence, annotations, elmo_vecs, cur_word_index):
         if len(annotations) == 0:
