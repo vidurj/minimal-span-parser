@@ -259,12 +259,13 @@ class TopDownParser(object):
             lstm_outputs[right + 1][self.lstm_dim:])
         return dy.concatenate([forward, backward])
 
-    def _encodings_to_label_log_probabilities(self, encodings, lmbd=None):
+    def _encodings_to_label_log_probabilities(self, encodings, lmbd=None, alpha=None):
         label_scores = self.f_label(dy.concatenate_to_batch(encodings))
         label_scores_reshaped = dy.reshape(label_scores, (self.label_vocab.size, len(encodings)))
 
-        if lmbd is not None:
-            label_scores_reshaped = dy.cmult(label_scores_reshaped, lmbd)
+        if alpha is not None:
+            temp = dy.abs(dy.reshape(alpha[0], (1, 1)))
+            label_scores_reshaped = dy.cmult(dy.logistic(dy.cmult(label_scores_reshaped, temp) + alpha[1]), lmbd) + alpha[2]
 
         return dy.log_softmax(label_scores_reshaped)
 
@@ -548,7 +549,7 @@ class TopDownParser(object):
             return tree, additional_info, dy.exp(label_log_probabilities).npvalue()
 
 
-    def fine_tune_confidence(self, sentence, lmbd, elmo_embeddings, cur_word_index, gold):
+    def fine_tune_confidence(self, sentence, lmbd, alpha, elmo_embeddings, cur_word_index, gold):
         lstm_outputs = self._featurize_sentence(sentence, is_train=False,
                                                 elmo_embeddings=elmo_embeddings,
                                                 cur_word_index=cur_word_index)
@@ -558,7 +559,7 @@ class TopDownParser(object):
             for end in range(start + 1, len(sentence) + 1):
                 span_to_index[(start, end)] = len(encodings)
                 encodings.append(self._get_span_encoding(start, end, lstm_outputs))
-        label_log_probabilities = self._encodings_to_label_log_probabilities(encodings, lmbd=lmbd)
+        label_log_probabilities = self._encodings_to_label_log_probabilities(encodings, lmbd=lmbd, alpha=alpha)
 
         total_loss = dy.zeros(1)
         for start in range(0, len(sentence)):

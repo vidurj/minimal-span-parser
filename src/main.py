@@ -1058,38 +1058,44 @@ def run_train_question_bank(args):
 
 
 def fine_tune_confidence(args):
-    dev_parses = load_parses('data/train.trees')
-    print("Loaded {:,} test examples.".format(len(dev_parses)))
+    file_name = 'dev'
+    parses = load_parses('data/{}.trees'.format(file_name))
+    print("Loaded {:,} test examples.".format(len(parses)))
 
     print("Loading model from {}...".format(args.model_path_base))
     model = dy.ParameterCollection()
     lmbd_param_collection = model.add_subcollection("Lambda")
     [parser] = dy.load(args.model_path_base, model)
-    lmbd_parameter = lmbd_param_collection.add_parameters((1, 1), dy.ConstInitializer(1))
+    lmbd_parameter = lmbd_param_collection.add_parameters((1, 1), dy.ConstInitializer(998))
+    #998.97674561]] [ 0.00465745  1.75719917 -1.226492
+    alpha_parameter = lmbd_param_collection.parameters_from_numpy(np.array([0.00465745,  1.75719917, -1.226492]))
     trainer = dy.AdamTrainer(lmbd_param_collection)
     print(trainer.learning_rate)
-    trainer.restart(learning_rate=0.01)
+    trainer.restart(learning_rate=0.03)
     print(trainer.learning_rate)
     print("Parsing test sentences...")
     while True:
-        for index, tree in enumerate(dev_parses):
+        cur_word_index = None
+        for index, tree in enumerate(parses):
             if index % 100 == 0:
                 dy.renew_cg()
-                lmbd = dy.const_parameter(lmbd_parameter)
+                lmbd = dy.parameter(lmbd_parameter)
+                alpha = dy.parameter(alpha_parameter)
                 batch_losses = []
+                if cur_word_index is not None:
+                    assert cur_word_index == len(embedding_array), (cur_word_index, len(embedding_array))
                 cur_word_index = 0
                 batch_number = int(index / 100)
-                embedding_file_name = 'ptb_elmo_embeddings/train/batch_{}_embeddings.h5'.format(batch_number)
+                embedding_file_name = 'ptb_elmo_embeddings/{}/batch_{}_embeddings.h5'.format(file_name, batch_number)
                 h5f = h5py.File(embedding_file_name, 'r')
                 embedding_array = h5f['embeddings'][:, :, :]
                 elmo_embeddings = dy.inputTensor(embedding_array)
                 h5f.close()
                 print(index)
             sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-            loss = parser.fine_tune_confidence(sentence, lmbd, elmo_embeddings,
+            loss = parser.fine_tune_confidence(sentence, lmbd, alpha, elmo_embeddings,
                                                       cur_word_index, tree)
-
-            print(loss.scalar_value())
+            cur_word_index += len(sentence)
             batch_losses.append(loss)
 
             if index % 100 == 99:
@@ -1097,7 +1103,7 @@ def fine_tune_confidence(args):
                 batch_loss_value = batch_loss.scalar_value()
                 batch_loss.backward()
                 trainer.update()
-                print(batch_loss_value, lmbd_parameter.as_array())
+                print(batch_loss_value, lmbd_parameter.as_array(), alpha_parameter.as_array())
                 print('-' * 40)
 
 
