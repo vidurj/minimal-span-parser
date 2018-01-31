@@ -1,7 +1,11 @@
 import collections.abc
 
+deletable_tags = {',', ':', '``', "''", '.'}
+
+
 class TreebankNode(object):
     pass
+
 
 class InternalTreebankNode(TreebankNode):
     def __init__(self, label, children):
@@ -25,7 +29,6 @@ class InternalTreebankNode(TreebankNode):
     def convert(self, index=0):
         tree = self
         sublabels = [self.label]
-
         while len(tree.children) == 1 and isinstance(tree.children[0], InternalTreebankNode):
             tree = tree.children[0]
             sublabels.append(tree.label)
@@ -51,6 +54,7 @@ class InternalTreebankNode(TreebankNode):
 
         return InternalTreebankNode("*".join(sublabels), children)
 
+
 class LeafTreebankNode(TreebankNode):
     def __init__(self, tag, word):
         assert isinstance(tag, str)
@@ -69,8 +73,18 @@ class LeafTreebankNode(TreebankNode):
     def flatten(self):
         return self
 
+
 class ParseNode(object):
     pass
+
+
+def create_internal_parse_node(label, children):
+    if len(children) == 1 and isinstance(children[0], InternalParseNode):
+        child = children[0]
+        return create_internal_parse_node(label + child.label, child.children)
+    else:
+        return InternalParseNode(label, children)
+
 
 class InternalParseNode(ParseNode):
     def __init__(self, label, children):
@@ -83,13 +97,54 @@ class InternalParseNode(ParseNode):
         assert all(isinstance(child, ParseNode) for child in children)
         assert children
         assert len(children) > 1 or isinstance(children[0], LeafParseNode)
-        assert all(left.right == right.left for left, right in zip(children, children[1:]))
+        # assert all(left.right == right.left for left, right in zip(children, children[1:]))
         self.children = tuple(children)
 
         self.left = children[0].left
         self.right = children[-1].right
 
         self.leaves = [leaf for child in self.children for leaf in child.leaves]
+        self.tree_bank_version = None
+
+
+    def clean_up_punctuation(self):
+        new_children = []
+        for child in self.children:
+            child = child.clean_up_punctuation()
+            if isinstance(child, LeafParseNode):
+                new_children.append(child)
+            else:
+                child_children = child.children
+                while len(child_children) > 0 and isinstance(child_children[0], LeafParseNode) and child_children[0].tag in deletable_tags:
+                    new_children.append(child_children[0])
+                    child_children = child_children[1:]
+
+                more_children = []
+                while len(child_children) > 0 and isinstance(child_children[-1], LeafParseNode) and child_children[-1].tag in deletable_tags:
+                    more_children.append(child_children[-1])
+                    child_children = child_children[:-1]
+
+                if len(child_children) > 0:
+                    child = create_internal_parse_node(child.label, child_children)
+                    new_children.append(child)
+                new_children.extend(more_children)
+        return create_internal_parse_node(self.label, new_children)
+
+    def delete_punctuation(self):
+        new_children = []
+        for child in self.children:
+            if isinstance(child, InternalParseNode):
+                new_child = child.delete_punctuation()
+                if new_child is not None:
+                    new_children.append(new_child)
+            else:
+                assert isinstance(child, LeafParseNode)
+                if child.tag not in deletable_tags:
+                    new_children.append(child)
+        if len(new_children) == 0:
+            return None
+        else:
+            return create_internal_parse_node(self.label, new_children)
 
     def reset(self, left):
         self.left = left
@@ -103,11 +158,13 @@ class InternalParseNode(ParseNode):
         self.right = cur_left
 
     def convert(self):
-        children = [child.convert() for child in self.children]
-        tree = InternalTreebankNode(self.label[-1], children)
-        for sublabel in reversed(self.label[:-1]):
-            tree = InternalTreebankNode(sublabel, [tree])
-        return tree
+        if self.tree_bank_version is None:
+            children = [child.convert() for child in self.children]
+            tree = InternalTreebankNode(self.label[-1], children)
+            for sublabel in reversed(self.label[:-1]):
+                tree = InternalTreebankNode(sublabel, [tree])
+            self.tree_bank_version = tree
+        return self.tree_bank_version
 
     def enclosing(self, left, right):
         assert self.left <= left < right <= self.right, (self.left, left, right, self.right)
@@ -129,7 +186,8 @@ class InternalParseNode(ParseNode):
             child.left
             for child in self.enclosing(left, right).children
             if left < child.left < right
-        ]
+            ]
+
 
 class LeafParseNode(ParseNode):
     def __init__(self, index, tag, word):
@@ -145,12 +203,19 @@ class LeafParseNode(ParseNode):
         self.word = word
         self.leaves = [self]
 
+    def clean_up_punctuation(self):
+        return self
+
     def reset(self, left):
         self.left = left
         self.rigth = left + 1
 
     def convert(self):
         return LeafTreebankNode(self.tag, self.word)
+
+    def delete_punctuation(self):
+        return self
+
 
 def load_trees(path, strip_top=True):
     with open(path) as infile:

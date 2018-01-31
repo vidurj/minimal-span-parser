@@ -33,7 +33,7 @@ class Vocabulary(object):
 
         else:
             print("Unknown value: {}".format(value))
-            print(self.indices)
+            print(self.counts)
             assert isinstance(value, tuple)
             assert len(value) > 1
             return self.index(value[1:])

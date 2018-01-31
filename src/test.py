@@ -1,4 +1,1 @@
-
-
-
-with open('dev-regular-output.txt')
+(S (NP-SBJ (NP (PRP It))) (VP(VBZ 's) (NP-PRD (RB no) (JJ secret))))
