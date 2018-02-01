@@ -515,10 +515,8 @@ def run_training_on_spans(args):
         if sentence_number in train_tree_indices_set:
             data = []
             for (left, right), oracle_label in span_to_gold_label.items():
-                # if (left, right) != (0, len(sentence)) and sentence[left][0] in trees.deletable_tags and sentence[right - 1][0] in trees.deletable_tags:
-                #     assert oracle_label == parser.empty_label, oracle_label
-                # if oracle_label == ('NP', 'NP'):
-                #     print(sentence[left: right])
+                if (left, right) != (0, len(sentence)) and sentence[left][0] in trees.deletable_tags and sentence[right - 1][0] in trees.deletable_tags:
+                    assert oracle_label == parser.empty_label, oracle_label
                 oracle_label_index = parser.label_vocab.index(oracle_label)
                 data.append(label_nt(left=left, right=right, oracle_label_index=oracle_label_index))
             train_sentence_number_to_annotations[sentence_number] = data
@@ -1695,6 +1693,7 @@ def collect_mistakes(args):
     print("Loading model from {}...".format(args.model_path_base))
     model = dy.ParameterCollection()
     [parser] = dy.load(args.model_path_base, model)
+    print(parser.label_vocab.counts)
 
     print("Parsing test sentences...")
     errors = []
@@ -1720,7 +1719,6 @@ def collect_mistakes(args):
         span_to_label = get_all_spans(tree)
 
 
-        print("!", len(sentence))
         for span, label in span_to_label.items():
             start = span[0]
             end = span[1] - 1
@@ -1734,31 +1732,25 @@ def collect_mistakes(args):
             assert end < len(sentence), (end, len(sentence))
             label_index = parser.label_vocab.index(label)
             span_index = span_to_index[span]
-            prob = math.exp(label_log_probabilities[label_index, span_index])
-            predicted_label_index = np.argmax(label_log_probabilities[:, span_index])
-            predicted_label = parser.label_vocab.values[predicted_label_index]
-            alt_span_index = span_to_index[(start, end + 1)]
+            nc_prob = math.exp(label_log_probabilities[parser.empty_label_index, span_index])
+            if label_index == parser.empty_label_index:
+                prob = nc_prob
+            else:
+                prob = 1 - nc_prob
             if prob < 0.5:
-                alt_prob = math.exp(label_log_probabilities[label_index, alt_span_index])
-                if alt_prob > 0.5:
-                    print('alt span works!')
                 if label == ():
                     label_str = 'NC'
                 else:
                     label_str = ' '.join(label)
-                if predicted_label == ():
-                    predicted_label_str = 'NC'
-                else:
-                    predicted_label_str = ' '.join(predicted_label)
 
 
                 string = ' '.join(words[:span[0]]) + ' [[[ ' + ' '.join(words[span[0]:span[1]]) + ' ]]] ' + ' '.join(words[span[1]:])
-                errors.append((prob, label_str, predicted_label_str, string.strip()))
+                errors.append((prob, label_str, string.strip()))
 
     errors.sort(key=lambda x: x[0])
     error_string = ""
-    for prob, label, predicted_label, string in errors:
-        error_string += str(prob) + '\t' + label + '\t|||\t' + predicted_label + '\t' + string + '\n'
+    for prob, label, string in errors:
+        error_string += str(prob) + '\t' + label + '\t' + string + '\n'
     with open(args.expt_name + '/errors.txt', 'w') as f:
         f.write(error_string)
 
