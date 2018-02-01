@@ -12,7 +12,6 @@ import math
 import random
 import collections
 from main import get_important_spans, get_all_spans
-from sortedcontainers import SortedList
 from main import check_overlap
 
 START = "<START>"
@@ -293,9 +292,9 @@ class TopDownParser(object):
             total_loss = total_loss + loss
         return total_loss
 
-    def kbest(self, sentence, num_trees, elmo_embeddings, cur_word_index):
-        # What if I have the topk trees for every subspan, can I compose these to form the topk
-        # trees for the span itself?
+
+    def get_distribution_for_kbest(self, sentence, elmo_embeddings, cur_word_index):
+        assert self.empty_label_index == 0, self.empty_label_index
         lstm_outputs = self._featurize_sentence(sentence, is_train=False,
                                                 elmo_embeddings=elmo_embeddings,
                                                 cur_word_index=cur_word_index)
@@ -308,98 +307,10 @@ class TopDownParser(object):
 
         label_log_probabilities_np = self._encodings_to_label_log_probabilities(
             encodings).npvalue()
-        correction_term = np.sum(label_log_probabilities_np[self.empty_label_index, :])
-        label_log_probabilities_np -= label_log_probabilities_np[self.empty_label_index, :]
-
-        cache = {}
-        tree_to_string = {}
-
-        def compute_string(tree):
-            if tree not in tree_to_string:
-                deleted = tree.delete_punctuation()
-                if deleted is not None:
-                    tree_string = deleted.convert().linearize()
-                else:
-                    tree_string = ""
-                tree_to_string[tree] = tree_string
-            return tree_to_string[tree]
-
-        def helper(left, right):
-            assert left < right
-            key = (left, right)
-            if key in cache:
-                return cache[key]
-
-            span_index = span_to_index[(left, right)]
-            actions = list(enumerate(label_log_probabilities_np[:, span_index]))
-            if left == 0 and right == len(sentence):
-                assert self.empty_label_index == 0
-                actions = actions[1:]
-            actions.sort(key=lambda x: - x[1])
-            actions = actions[:num_trees]
-
-            if right - left == 1:
-                tag, word = sentence[left]
-                leaf = LeafParseNode(left, tag, word)
-                options = []
-                for label_index, score in actions:
-                    if label_index != self.empty_label_index:
-                        label = self.label_vocab.value(label_index)
-                        tree = InternalParseNode(label, [leaf])
-                    else:
-                        tree = leaf
-                    options.append(([tree], score))
-                cache[key] = options
-            else:
-                children_options = SortedList(key=lambda x: - x[1])
-                for split in range(left + 1, right):
-                    left_trees_options = helper(left, split)
-                    right_trees_options = helper(split, right)
-                    for (left_trees, left_score) in left_trees_options:
-                        if len(left_trees) > 1:
-                            # To avoid duplicates, we require that left trees are constituents
-                            continue
-                        for (right_trees, right_score) in right_trees_options:
-                            children = left_trees + right_trees
-                            score = left_score + right_score
-                            if len(children_options) < num_trees:
-                                children_options.add((children, score))
-                            elif children_options[-1][1] < score:
-                                del children_options[-1]
-                                children_options.add((children, score))
-
-                options = SortedList(key=lambda x: - x[1])
-                seen = set()
-                for (label_index, action_score) in actions:
-                    for (children, children_score) in children_options:
-                        option_score = action_score + children_score
-                        if label_index != self.empty_label_index:
-                            label = self.label_vocab.value(label_index)
-                            tree = InternalParseNode(label, children)
-                            option = [tree]
-                        else:
-                            option = children
-                        option_string = ''.join([compute_string(tree) for tree in option])
-                        if option_string in seen:
-                            continue
-                        elif len(options) < num_trees:
-                            options.add((option, option_score))
-                            seen.add(option_string)
-                        elif options[-1][1] < option_score:
-                            del options[-1]
-                            options.add((option, option_score))
-                            seen.add(option_string)
-                        else:
-                            break
-                cache[key] = options
-            return cache[key]
-
-        trees_and_scores = helper(0, len(sentence))[:num_trees]
-        trees = []
-        for tree, score in trees_and_scores:
-            assert len(tree) == 1
-            trees.append((tree[0], score + correction_term))
-        return trees
+        non_constituent_probabilities = np.exp(
+            label_log_probabilities_np[self.empty_label_index, :])
+        label_log_probabilities_np = np.log(np.array([non_constituent_probabilities, 1 - non_constituent_probabilities]))
+        return (label_log_probabilities_np, span_to_index)
 
     def produce_parse_forest(self, sentence, required_probability_mass):
         lstm_outputs = self._featurize_sentence(sentence, is_train=False)

@@ -7,6 +7,7 @@ import time
 from collections import namedtuple
 import math
 import dynet as dy
+import multiprocessing
 import numpy as np
 from scipy import stats
 import evaluate
@@ -17,6 +18,7 @@ from trees import InternalParseNode, LeafParseNode, ParseNode
 from collections import defaultdict
 import h5py
 import json
+from sortedcontainers import SortedList
 
 
 
@@ -513,10 +515,10 @@ def run_training_on_spans(args):
         if sentence_number in train_tree_indices_set:
             data = []
             for (left, right), oracle_label in span_to_gold_label.items():
-                if (left, right) != (0, len(sentence)) and sentence[left][0] in trees.deletable_tags and sentence[right - 1][0] in trees.deletable_tags:
-                    assert oracle_label == parser.empty_label, oracle_label
-                if oracle_label == ('NP', 'NP'):
-                    print(sentence[left: right])
+                # if (left, right) != (0, len(sentence)) and sentence[left][0] in trees.deletable_tags and sentence[right - 1][0] in trees.deletable_tags:
+                #     assert oracle_label == parser.empty_label, oracle_label
+                # if oracle_label == ('NP', 'NP'):
+                #     print(sentence[left: right])
                 oracle_label_index = parser.label_vocab.index(oracle_label)
                 data.append(label_nt(left=left, right=right, oracle_label_index=oracle_label_index))
             train_sentence_number_to_annotations[sentence_number] = data
@@ -1286,7 +1288,116 @@ def fine_tune_confidence(args):
                 print('-' * 40)
 
 
+def kbest(args):
+    empty_label_index = 0
+    labels = [(), ('XX',)]
+    sentence, num_trees, label_log_probabilities_np, span_to_index = args
+    correction_term = np.sum(label_log_probabilities_np[0, :])
+    label_log_probabilities_np -= label_log_probabilities_np[0, :]
 
+    cache = {}
+
+    # tree_to_string = {}
+    #
+    # def compute_string(tree):
+    #     if tree not in tree_to_string:
+    #         deleted = tree.delete_punctuation()
+    #         if deleted is not None:
+    #             tree_string = deleted.convert().linearize()
+    #         else:
+    #             tree_string = ""
+    #         tree_to_string[tree] = tree_string
+    #     return tree_to_string[tree]
+
+    def helper(left, right):
+        assert left < right
+        key = (left, right)
+        if key in cache:
+            return cache[key]
+
+        span_index = span_to_index[(left, right)]
+        actions = list(enumerate(label_log_probabilities_np[:, span_index]))
+        if left == 0 and right == len(sentence):
+            actions = actions[1:]
+        actions.sort(key=lambda x: - x[1])
+        actions = actions[:num_trees]
+
+        if right - left == 1:
+            tag, word = sentence[left]
+            leaf = LeafParseNode(left, tag, word)
+            options = []
+            for label_index, score in actions:
+                if label_index != empty_label_index:
+                    label = labels[label_index]
+                    tree = InternalParseNode(label, [leaf])
+                else:
+                    tree = leaf
+                options.append(([tree], score))
+            cache[key] = options
+        else:
+            children_options = SortedList(key=lambda x: - x[1])
+            for split in range(left + 1, right):
+                left_trees_options = helper(left, split)
+                right_trees_options = helper(split, right)
+                for (left_trees, left_score) in left_trees_options:
+                    if len(left_trees) > 1:
+                        # To avoid duplicates, we require that left trees are constituents
+                        continue
+                    for (right_trees, right_score) in right_trees_options:
+                        children = left_trees + right_trees
+                        score = left_score + right_score
+                        if len(children_options) < num_trees:
+                            children_options.add((children, score))
+                        elif children_options[-1][1] < score:
+                            del children_options[-1]
+                            children_options.add((children, score))
+
+            options = SortedList(key=lambda x: - x[1])
+            string_to_score = {}
+            for (label_index, action_score) in actions:
+                for (children, children_score) in children_options:
+                    option_score = action_score + children_score
+                    if label_index != 0:
+                        label = labels[label_index]
+                        tree = InternalParseNode(label, children)
+                        option = [tree]
+                    else:
+                        option = children
+                    option_string = ''.join([compute_string(tree) for tree in option])
+                    if option_string in string_to_score and option_score <= string_to_score[option_string]:
+                        continue
+
+                    string_to_score[option_string] = option_score
+                    if len(options) < num_trees:
+                        options.add((option, option_score))
+                    elif options[-1][1] < option_score:
+                        del options[-1]
+                        options.add((option, option_score))
+                    else:
+                        break
+            cache[key] = options
+        return cache[key]
+
+    trees_and_scores = helper(0, len(sentence))[:num_trees]
+    trees = []
+    scores = []
+    for tree, score in trees_and_scores:
+        assert len(tree) == 1
+        trees.append(tree[0].convert())
+        scores.append(score + correction_term)
+    return trees, scores
+
+
+tree_to_string = {}
+def compute_string(tree):
+    if tree not in tree_to_string:
+        deleted = tree.delete_punctuation()
+        if deleted is not None:
+            tree_string = deleted.convert().linearize()
+        else:
+            tree_string = ""
+        tree_to_string[tree] = tree_string
+    return tree_to_string[tree]
 
 def compute_kbest_f1(args):
     sizes = [1, 5, 10, 15, 20, 50, 100, 200, 300, 400, 500]
@@ -1309,9 +1420,9 @@ def compute_kbest_f1(args):
     assert file_name == 'test' or file_name == 'dev' or file_name == 'train', args.test_path
 
     print("Parsing test sentences...")
-    all_scores = []
-    predicted_acc = []
-    gold_acc = []
+    data = []
+    num_cpus = multiprocessing.cpu_count()
+    pool = multiprocessing.Pool()
     for index, tree in enumerate(test_parses):
         if index % 100 == 0:
             dy.renew_cg()
@@ -1325,19 +1436,27 @@ def compute_kbest_f1(args):
             h5f.close()
             print(index)
         sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-        predicted_trees_and_scores = parser.kbest(sentence, args.num_trees, elmo_embeddings, cur_word_index)
+        (label_log_probabilities_np, span_to_index) = parser.get_distribution_for_kbest(sentence, elmo_embeddings, cur_word_index)
         cur_word_index += len(sentence)
-        assert len(predicted_trees_and_scores) == args.num_trees, (sentence, len(predicted_trees_and_scores))
-        predicted_trees, scores = zip(*predicted_trees_and_scores)
-        predicted_trees = [tree.convert() for tree in predicted_trees]
+        data.append((sentence, args.num_trees, label_log_probabilities_np, span_to_index))
+
+    responses = pool.map(kbest, data, chunksize=int(math.floor(len(data) / num_cpus)))
+    all_scores = []
+    predicted_acc = []
+    gold_acc = []
+    num_trees = []
+    for (tree, (predicted_trees, scores)) in zip(test_parses, responses):
+        # assert len(predicted_trees_and_scores) == args.num_trees, (sentence, len(predicted_trees_and_scores))
         # predicted, additional_info, _ = parser.span_parser(sentence, is_train=False, gold=tree)
         gold_treebank_tree = tree.convert()
         predicted_acc.extend(predicted_trees)
         gold_acc.extend([gold_treebank_tree for _ in predicted_trees])
         all_scores.extend(scores)
+        assert len(predicted_trees) == len(scores)
+        num_trees.append(len(predicted_trees))
 
     evaluate.evalb(args.evalb_dir, gold_acc, predicted_acc, args=args,
-                                 name="bestk")
+                                 name="bestk", flatten=True, erase_labels=True)
     file_path = os.path.join(args.expt_name, 'bestk-output.txt')
     with open(file_path, 'r') as f:
         text = f.read().strip().splitlines()
@@ -1351,12 +1470,16 @@ def compute_kbest_f1(args):
     threshold_to_scores = {}
     for threshold in thresholds:
         threshold_to_scores[threshold] = []
+    ks_to_ks = {}
+    for ks in sizes:
+        ks_to_ks[ks] = []
     threshold_to_ks = {}
     for threshold in threshold_to_scores.keys():
         threshold_to_ks[threshold] = []
     buffer = []
     buffer_probability = 0
     cur_index = 0
+    cur_tree_number = 0
     for line in text:
         if line == '============================================================================':
             if flag:
@@ -1373,6 +1496,7 @@ def compute_kbest_f1(args):
             else:
                 f1 = 2 / (1 / precision + 1 / recall)
             buffer.append((matched_brackets, gold_brackets, predicted_brackets, f1))
+            print(all_scores[cur_index])
             probability = math.exp(all_scores[cur_index])
             cur_index += 1
             old_buffer_probability = buffer_probability
@@ -1389,7 +1513,7 @@ def compute_kbest_f1(args):
                     threshold_to_ks[threshold].append(len(buffer))
 
             # Must be num_trees since we are generating num_trees and we will be out of alignment
-            if len(buffer) == args.num_trees:
+            if len(buffer) == num_trees[cur_tree_number]:
                 for threshold in thresholds:
                     if buffer_probability < threshold:
                         print(threshold, 'was too high for', args.num_trees, 'trees')
@@ -1397,6 +1521,7 @@ def compute_kbest_f1(args):
                         threshold_to_ks[threshold].append(len(buffer))
                 buffer = []
                 buffer_probability = 0
+                cur_tree_number += 1
 
     def print_stats(best_scores, name):
         total_matched_brackets = np.sum([x[0] for x in best_scores])
@@ -1409,22 +1534,23 @@ def compute_kbest_f1(args):
         print('precision:', precision,
               'recall:', recall,
               'f1:', f1,
-              'complete match fraction:', complete_match_fraction)
+              'complete match fraction:', complete_match_fraction,
+              'num sentences:')
         with open(name + '.pickle', 'wb') as f:
             pickle.dump(best_scores, f)
 
-    expected_length = len(all_scores) / args.num_trees
 
     for size in sizes:
         print(size)
-        assert len(size_to_scores[size]) == expected_length
+        if len(size_to_scores[size]) != len(test_parses):
+            print(size, 'has only', len(size_to_scores[size]), 'instances instead of', len(test_parses))
         print_stats(size_to_scores[size], 'k_equals_' + str(size))
         print('-' * 50)
 
     for probability in threshold_to_scores.keys():
         print('threshold', probability)
-        assert len(threshold_to_ks[probability]) == expected_length
-        assert len(threshold_to_scores[probability]) == expected_length
+        assert len(threshold_to_ks[probability]) == len(test_parses)
+        assert len(threshold_to_scores[probability]) == len(test_parses)
         print('avg k', np.mean(threshold_to_ks[probability]))
         print_stats(threshold_to_scores[probability], 'probability_mass_' + str(probability))
         print('-' * 50)
