@@ -267,7 +267,7 @@ class TopDownParser(object):
         #     label_scores_reshaped = dy.cmult(dy.logistic(dy.cmult(label_scores_reshaped, temp) + alpha[1]), lmbd) + alpha[2]
         # 990.51641846]] [ 0.03124614  4.00097179 -9.43100834
         # label_scores_reshaped = dy.logistic(label_scores_reshaped * 0.03124614 + 4.00097179) * 990.51641846 - 9.43100834
-        return dy.log_softmax(0.6 * label_scores_reshaped)
+        return dy.log_softmax(label_scores_reshaped)
 
     def train_on_partial_annotation(self, sentence, annotations, elmo_vecs, cur_word_index):
         if len(annotations) == 0:

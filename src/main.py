@@ -1686,6 +1686,93 @@ def run_test(args):
         pickle.dump(total_confusion_matrix, f)
 
 
+
+def collect_mistakes_on_qb(args):
+    if not os.path.exists(args.expt_name):
+        os.mkdir(args.expt_name)
+
+    print("Loading model from {}...".format(args.model_path_base))
+    model = dy.ParameterCollection()
+    [parser] = dy.load(args.model_path_base, model)
+
+    assert args.split == 'dev', args.split
+    test_path = 'questionbank/qbank.dev.trees'.format(args.split)
+    test_treebank = load_parses(test_path)
+    test_embeddings = []
+    if args.split == 'train':
+        indices = range(2000)
+    elif args.split == 'dev':
+        indices = range(2000, 3000)
+    else:
+        assert args.split == 'test', args.split
+        indices = range(3000, 4000)
+
+    with h5py.File('question_bank_elmo_embeddings.hdf5', 'r') as h5f:
+        for index in indices:
+            test_embeddings.append(h5f[str(index)][:, :, :])
+
+    test_embeddings_np = np.swapaxes(np.concatenate(test_embeddings, axis=1), axis1=0, axis2=1)
+
+    errors = []
+    cur_word_index = 0
+    for dev_index, tree in enumerate(test_treebank):
+        if dev_index % 100 == 0:
+            dy.renew_cg()
+            test_embeddings = dy.inputTensor(test_embeddings_np)
+        sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
+        sentence_str = ' '.join([word for tag, word in sentence])
+        words = [word for pos, word in sentence]
+        span_to_index, label_log_probabilities = parser.compute_label_distributions(sentence,
+                                                                                  is_train=False,
+                                                                                  elmo_embeddings=test_embeddings,
+                                                                                  cur_word_index=cur_word_index)
+        label_log_probabilities = label_log_probabilities.npvalue()
+        cur_word_index += len(sentence)
+        span_to_label = get_all_spans(tree)
+
+        predicted_tree, _ = parse.optimal_parser(label_log_probabilities,
+                                                      span_to_index,
+                                                      sentence,
+                                                      parser.empty_label_index,
+                                                      parser.label_vocab,
+                                                      tree)
+
+        predicted_parse_string = predicted_tree.convert().linearize()
+        gold_parse_string = tree.convert().linearize()
+
+        worst_error_prob = None
+        worst_error_string = None
+        worst_error_gold_label = None
+        for span, label in span_to_label.items():
+            label_index = parser.label_vocab.index(label)
+            span_index = span_to_index[span]
+            nc_prob = math.exp(label_log_probabilities[parser.empty_label_index, span_index])
+
+            if label_index == parser.empty_label_index:
+                prob = nc_prob
+            else:
+                prob = 1 - nc_prob
+            if worst_error_prob is None or prob < worst_error_prob:
+                worst_error_prob = prob
+                worst_error_string = ' '.join(words[span[0]:span[1]])
+                if label == ():
+                    worst_error_gold_label = 'NC'
+                else:
+                    worst_error_gold_label = ' '.join(label)
+
+
+        errors.append((sentence_str, gold_parse_string, predicted_parse_string, worst_error_string, worst_error_gold_label, str(worst_error_prob)))
+
+    keys = ['sentence', 'gold parse', 'pred parse', 'span text', 'span gold label', 'span gold label probability']
+    errors.sort(key=lambda x: x[0])
+    error_string = ""
+    for lines in errors:
+        formatted_lines = [x + ': ' + y for x, y in zip(keys, lines)]
+        error_string += '\n'.join(formatted_lines) + '\n***\n'
+    with open(args.expt_name + '-errors.txt', 'w') as f:
+        f.write(error_string)
+
+
 def collect_mistakes(args):
     if not os.path.exists(args.expt_name):
         os.mkdir(args.expt_name)
@@ -1715,48 +1802,57 @@ def collect_mistakes(args):
         sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
         words = [word for pos, word in sentence]
         span_to_index, label_log_probabilities = parser.compute_label_distributions(sentence,
-                                                                                  is_train=True,
+                                                                                  is_train=False,
                                                                                   elmo_embeddings=elmo_embeddings,
                                                                                   cur_word_index=cur_word_index)
         label_log_probabilities = label_log_probabilities.npvalue()
         cur_word_index += len(sentence)
         span_to_label = get_all_spans(tree)
 
+        predicted_tree, _ = parse.optimal_parser(label_log_probabilities,
+                                                      span_to_index,
+                                                      sentence,
+                                                      parser.empty_label_index,
+                                                      parser.label_vocab,
+                                                      tree)
 
+        predicted_parse_string = predicted_tree.convert().linearize()
+        gold_parse_string = tree.convert().linearize()
+
+        worst_error_prob = None
+        worst_error_string = None
+        worst_error_gold_label = None
         for span, label in span_to_label.items():
-            start = span[0]
-            end = span[1] - 1
-            # while start < len(sentence) and sentence[start][0] in deletable_tags:
-            #     start += 1
-            # while end >= 0 and sentence[end][0] in deletable_tags:
-            #     end -= 1
-            if end <= start:
-                start = span[0]
-                end = span[1] - 1
-            assert end < len(sentence), (end, len(sentence))
             label_index = parser.label_vocab.index(label)
             span_index = span_to_index[span]
             nc_prob = math.exp(label_log_probabilities[parser.empty_label_index, span_index])
+
             if label_index == parser.empty_label_index:
                 prob = nc_prob
             else:
                 prob = 1 - nc_prob
-            if prob < 0.5:
+            if worst_error_prob is None or prob < worst_error_prob:
+                worst_error_prob = prob
+                worst_error_string = ' '.join(words[span[0]:span[1]])
                 if label == ():
-                    label_str = 'NC'
+                    worst_error_gold_label = 'NC'
                 else:
-                    label_str = ' '.join(label)
+                    worst_error_gold_label = ' '.join(label)
 
 
-                string = ' '.join(words[:span[0]]) + ' [[[ ' + ' '.join(words[span[0]:span[1]]) + ' ]]] ' + ' '.join(words[span[1]:])
-                errors.append((prob, label_str, string.strip()))
+        errors.append((gold_parse_string, predicted_parse_string, worst_error_string, worst_error_gold_label, str(worst_error_prob)))
 
+    keys = ['gold parse', 'pred parse', 'span text', 'span gold label', 'span gold label probability']
     errors.sort(key=lambda x: x[0])
     error_string = ""
-    for prob, label, string in errors:
-        error_string += str(prob) + '\t' + label + '\t' + string + '\n'
+    for lines in errors:
+        formatted_lines = [x + ': ' + y for x, y in zip(keys, lines)]
+        error_string += '\n'.join(formatted_lines) + '\n***\n'
     with open(args.expt_name + '/errors.txt', 'w') as f:
         f.write(error_string)
+
+
+
 
 
 
@@ -1860,6 +1956,14 @@ def main():
         subparser.add_argument(arg)
     subparser.add_argument("--model-path-base", required=True)
     subparser.add_argument("--expt-name", required=True)
+
+    subparser = subparsers.add_parser("collect-errors-on-qb")
+    subparser.set_defaults(callback=collect_mistakes_on_qb)
+    for arg in dynet_args:
+        subparser.add_argument(arg)
+    subparser.add_argument("--model-path-base", required=True)
+    subparser.add_argument("--expt-name", required=True)
+    subparser.add_argument("--split", default='dev')
 
     subparser = subparsers.add_parser("parse-forest")
     subparser.set_defaults(callback=produce_parse_forests)
