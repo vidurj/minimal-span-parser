@@ -98,7 +98,7 @@ class InternalParseNode(ParseNode):
         assert all(isinstance(child, ParseNode) for child in children)
         assert children
         assert len(children) > 1 or isinstance(children[0], LeafParseNode)
-        # assert all(left.right == right.left for left, right in zip(children, children[1:]))
+        assert all(left.right == right.left for left, right in zip(children, children[1:]))
         self.children = tuple(children)
 
         self.left = children[0].left
@@ -107,6 +107,33 @@ class InternalParseNode(ParseNode):
         self.leaves = [leaf for child in self.children for leaf in child.leaves]
         self._delete_punctuation = None
         self._tree_bank = None
+
+
+    def clean_up_punctuation(self):
+        new_children = []
+        for child in self.children:
+            if isinstance(child, LeafParseNode):
+                new_children.append(child)
+            else:
+                child = child.clean_up_punctuation()
+                child_children = child.children
+                while len(child_children) > 0 and isinstance(child_children[0], LeafParseNode) and child_children[0].tag in deletable_tags:
+                    new_children.append(child_children[0])
+                    child_children = child_children[1:]
+
+                more_children = []
+                while len(child_children) > 0 and isinstance(child_children[-1], LeafParseNode) and child_children[-1].tag in deletable_tags:
+                    more_children.append(child_children[-1])
+                    child_children = child_children[:-1]
+
+                if len(child_children) > 0:
+                    new_child = create_internal_parse_node(child.label, child_children)
+                    assert new_child is not None, (child.left, child.right, child.label)
+                    new_children.append(new_child)
+                new_children.extend(list(reversed(more_children)))
+        new_node = create_internal_parse_node(self.label, new_children)
+        assert new_node.left == self.left and new_node.right == self.right, (new_node.left, self.left, new_node.right, self.right)
+        return new_node
 
     def delete_punctuation(self):
         if self._delete_punctuation is None:

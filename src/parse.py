@@ -236,17 +236,14 @@ class TopDownParser(object):
             tag_embedding = self.tag_embeddings[self.tag_vocab.index(tag)]
             if word not in (START, STOP):
                 count = self.word_vocab.count(word)
-                if not count or (
-                            is_train and (
-                                np.random.rand() < 1 / (1 + count) or np.random.rand() < 0.1)):
+                if not count or (is_train and (np.random.rand() < 1 / (1 + count))):
                     word = UNK
             word_embedding = self.word_embeddings[self.word_vocab.index(word)]
             if tag == START or tag == STOP:
                 concatenated_embeddings = [tag_embedding, word_embedding, dy.zeros(1024)]
             else:
                 elmo_weights = dy.parameter(self.elmo_weights)
-                embedding = dy.sum_dim(dy.cmult(elmo_weights, elmo_embeddings[cur_word_index]),
-                                       [0])
+                embedding = dy.sum_dim(dy.cmult(elmo_weights, elmo_embeddings[cur_word_index]), [0])
                 concatenated_embeddings = [tag_embedding, word_embedding, embedding]
                 cur_word_index += 1
             embeddings.append(dy.concatenate(concatenated_embeddings))
@@ -270,7 +267,7 @@ class TopDownParser(object):
         #     label_scores_reshaped = dy.cmult(dy.logistic(dy.cmult(label_scores_reshaped, temp) + alpha[1]), lmbd) + alpha[2]
         # 990.51641846]] [ 0.03124614  4.00097179 -9.43100834
         # label_scores_reshaped = dy.logistic(label_scores_reshaped * 0.03124614 + 4.00097179) * 990.51641846 - 9.43100834
-        return dy.log_softmax(label_scores_reshaped)
+        return dy.log_softmax(0.6 * label_scores_reshaped)
 
     def train_on_partial_annotation(self, sentence, annotations, elmo_vecs, cur_word_index):
         if len(annotations) == 0:
@@ -475,6 +472,8 @@ class TopDownParser(object):
                 for end in range(start + 1, len(sentence) + 1):
                     gold_label = gold.oracle_label(start, end)
                     gold_label_index = self.label_vocab.index(gold_label)
+                    if gold_label_index != 0:
+                        gold_label_index = 1
                     index = span_to_index[(start, end)]
                     total_loss -= label_log_probabilities[gold_label_index][index]
             return None, total_loss

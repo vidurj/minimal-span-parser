@@ -508,17 +508,21 @@ def run_training_on_spans(args):
     active_learning_sentences_and_spans = []
     for sentence_number in range(len(all_parses)):
         parse = all_parses[sentence_number]
+        sentence = [(leaf.tag, leaf.word) for leaf in parse.leaves]
+        span_to_gold_label = get_all_spans(parse)
+        assert span_to_gold_label[(0, len(sentence))] != ()
         parse = parse.clean_up_punctuation()
         all_parses[sentence_number] = parse
         span_to_gold_label = get_all_spans(parse)
-        sentence = [(leaf.tag, leaf.word) for leaf in parse.leaves]
+        assert span_to_gold_label[(0, len(sentence))] != ()
         if sentence_number in train_tree_indices_set:
             data = []
-            for (left, right), oracle_label in span_to_gold_label.items():
-                if (left, right) != (0, len(sentence)) and sentence[left][0] in trees.deletable_tags and sentence[right - 1][0] in trees.deletable_tags:
-                    assert oracle_label == parser.empty_label, oracle_label
-                oracle_label_index = parser.label_vocab.index(oracle_label)
-                data.append(label_nt(left=left, right=right, oracle_label_index=oracle_label_index))
+            for (left, right), oracle_label in list(span_to_gold_label.items()):
+                if (left, right) != (0, len(sentence)) and (sentence[left][0] in trees.deletable_tags or sentence[right - 1][0] in trees.deletable_tags):
+                    assert oracle_label == parser.empty_label, (oracle_label, left, right, 0, len(sentence), sentence[left: right], sentence)
+                else:
+                    oracle_label_index = parser.label_vocab.index(oracle_label)
+                    data.append(label_nt(left=left, right=right, oracle_label_index=oracle_label_index))
             train_sentence_number_to_annotations[sentence_number] = data
         else:
             active_learning_sentences_and_spans.append((sentence_number, sentence, span_to_gold_label))
@@ -1711,7 +1715,7 @@ def collect_mistakes(args):
         sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
         words = [word for pos, word in sentence]
         span_to_index, label_log_probabilities = parser.compute_label_distributions(sentence,
-                                                                                  is_train=False,
+                                                                                  is_train=True,
                                                                                   elmo_embeddings=elmo_embeddings,
                                                                                   cur_word_index=cur_word_index)
         label_log_probabilities = label_log_probabilities.npvalue()

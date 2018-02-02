@@ -7,3 +7,12 @@ d = e
 d.sort(key=lambda x: - len(x))
 for x in d:
     print(x)
+
+
+
+[('``', '``'), ('DT', 'The'), ('NN', 'range'), ('IN', 'of'), ('NNS', 'expectations'), ('VBZ', 'is'), ('RB', 'so'), ('JJ', 'broad'), (',', ','), ("''", "''"), ('DT', 'a'), ('NN', 'dealer'), ('IN', 'at'), ('DT', 'another'), ('JJ', 'major'), ('NNP', 'U.K.'), ('NN', 'brokerage'), ('NN', 'firm'), ('VBD', 'said'), ('``', '``'), (',', ','), ('DT', 'the'), ('NN', 'deficit'), ('MD', 'may'), ('VB', 'have'), ('TO', 'to'), ('VB', 'be'), ('IN', 'nearer'), ('CC', 'or'), ('IN', 'above'), ('num', 'num'), ('CD', '2'), ('CD', 'billion'), ('IN', 'for'), ('PRP', 'it'), ('TO', 'to'), ('VB', 'have'), ('DT', 'any'), ('NN', 'impact'), ('IN', 'on'), ('DT', 'the'), ('NN', 'market'), ("''", "''")], \
+[('``', '``'), ('DT', 'The'), ('NN', 'range'), ('IN', 'of'), ('NNS', 'expectations'), ('VBZ', 'is'), ('RB', 'so'), ('JJ', 'broad'), (',', ','), ("''", "''"), ('DT', 'a'), ('NN', 'dealer'), ('IN', 'at'), ('DT', 'another'), ('JJ', 'major'), ('NNP', 'U.K.'), ('NN', 'brokerage'), ('NN', 'firm'), ('VBD', 'said'), ('``', '``'), (',', ','), ('DT', 'the'), ('NN', 'deficit'), ('MD', 'may'), ('VB', 'have'), ('TO', 'to'), ('VB', 'be'), ('IN', 'nearer'), ('CC', 'or'), ('IN', 'above'), ('num', 'num'), ('CD', '2'), ('CD', 'billion'), ('IN', 'for'), ('PRP', 'it'), ('TO', 'to'), ('VB', 'have'), ('DT', 'any'), ('NN', 'impact'), ('IN', 'on'), ('DT', 'the'), ('NN', 'market'), ("''", "''"), ('.', '.')]
+
+
+(S (NP (NNP Gold)) (VP (ADVP (RB also)) (VBD rose)) (. .))
+(S (NP (NNP Gold)) (ADVP (RB also)) (VP (VBD rose)) (. .))
