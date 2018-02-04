@@ -133,8 +133,7 @@ def optimal_parser(label_log_probabilities_np,
             span_index = span_to_index[(choice[0], choice[1])]
             predicted_parse_log_likelihood += adjusted[choice[4], span_index]
         num_spans_forced_off = len(greedily_chosen_spans) - len(span_to_label)
-        return span_to_label, (
-            predicted_parse_log_likelihood, confusion_matrix, num_spans_forced_off, rank)
+        return span_to_label, (predicted_parse_log_likelihood, confusion_matrix, num_spans_forced_off, rank, gold_parse_log_likelihood)
 
     span_to_label, additional_info = choose_consistent_spans()
     tree = construct_tree_from_spans(span_to_label, sentence)
@@ -148,13 +147,15 @@ class Feedforward(object):
         self.spec.pop("model")
 
         self.model = model.add_subcollection("Feedforward")
-
+        self.layer_params = []
         self.weights = []
         self.biases = []
         dims = [input_dim] + hidden_dims + [output_dim]
         for prev_dim, next_dim in zip(dims, dims[1:]):
-            self.weights.append(self.model.add_parameters((next_dim, prev_dim)))
-            self.biases.append(self.model.add_parameters(next_dim))
+            layer_params = self.model.add_subcollection("Layer" + str(len(self.weights)))
+            self.weights.append(layer_params.add_parameters((next_dim, prev_dim)))
+            self.biases.append(layer_params.add_parameters(next_dim))
+            self.layer_params.append(layer_params)
 
     def param_collection(self):
         return self.model
@@ -193,23 +194,24 @@ class TopDownParser(object):
         self.spec.pop("model")
 
         self.model = model.add_subcollection("Parser")
-        self.elmo_weights = self.model.parameters_from_numpy(
+        self.all_except_f_label = self.model.add_subcollection("allExceptFLabel")
+        self.elmo_weights = self.all_except_f_label.parameters_from_numpy(
             np.array([0.16397782, 0.67511874, 0.02329052]), name='elmo-averaging-weights')
         self.tag_vocab = tag_vocab
         self.word_vocab = word_vocab
         self.label_vocab = label_vocab
         self.lstm_dim = lstm_dim
 
-        self.tag_embeddings = self.model.add_lookup_parameters(
+        self.tag_embeddings = self.all_except_f_label.add_lookup_parameters(
             (tag_vocab.size, tag_embedding_dim))
-        self.word_embeddings = self.model.add_lookup_parameters(
+        self.word_embeddings = self.all_except_f_label.add_lookup_parameters(
             (word_vocab.size, word_embedding_dim))
 
         self.lstm = dy.BiRNNBuilder(
             lstm_layers,
             tag_embedding_dim + word_embedding_dim + 1024,
             2 * lstm_dim,
-            self.model,
+            self.all_except_f_label,
             dy.VanillaLSTMBuilder)
 
         self.f_label = Feedforward(
@@ -236,7 +238,7 @@ class TopDownParser(object):
             tag_embedding = self.tag_embeddings[self.tag_vocab.index(tag)]
             if word not in (START, STOP):
                 count = self.word_vocab.count(word)
-                if not count or (is_train and (np.random.rand() < 1 / (1 + count))):
+                if not count or (is_train and (np.random.rand() < 1 / (1 + count) or np.random.rand() < 0.1)):
                     word = UNK
             word_embedding = self.word_embeddings[self.word_vocab.index(word)]
             if tag == START or tag == STOP:
@@ -472,8 +474,6 @@ class TopDownParser(object):
                 for end in range(start + 1, len(sentence) + 1):
                     gold_label = gold.oracle_label(start, end)
                     gold_label_index = self.label_vocab.index(gold_label)
-                    if gold_label_index != 0:
-                        gold_label_index = 1
                     index = span_to_index[(start, end)]
                     total_loss -= label_log_probabilities[gold_label_index][index]
             return None, total_loss
@@ -485,7 +485,7 @@ class TopDownParser(object):
                                                    self.empty_label_index,
                                                    self.label_vocab,
                                                    gold)
-            return tree, additional_info, dy.exp(label_log_probabilities).npvalue()
+            return tree, additional_info
 
     def fine_tune_confidence(self, sentence, lmbd, alpha, elmo_embeddings, cur_word_index, gold):
         lstm_outputs = self._featurize_sentence(sentence, is_train=False,
