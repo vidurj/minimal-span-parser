@@ -529,11 +529,11 @@ def run_training_on_spans(args):
 
     print("Processing trees for training...")
 
-    # params = parser.f_label.param_collections + [parser.lstm.param_collection(), parser.tag_embeddings.param_collection(), parser.word_embeddings.param_collection()]
-    assert len(parser.f_label.layer_params) == 2, len(parser.f_label.layer_params)
-    trainers = [dy.AdamTrainer(parser.f_label.layer_params[0]),
-                dy.AdamTrainer(parser.f_label.layer_params[1]),
-                dy.AdamTrainer(parser.all_except_f_label)]
+    # assert len(parser.f_label.layer_params) == 2, len(parser.f_label.layer_params)
+    # trainers = [dy.AdamTrainer(parser.f_label.layer_params[0]),
+    #             dy.AdamTrainer(parser.f_label.layer_params[1]),
+    #             dy.AdamTrainer(parser.all_except_f_label)]
+    trainer = dy.AdamTrainer(model)
 
     total_processed = 0
     current_processed = 0
@@ -731,16 +731,7 @@ def run_training_on_spans(args):
                     print("elmo weights", parser.elmo_weights.as_array())
                     batch_loss = dy.average(batch_losses)
                     batch_loss.backward()
-                    if batch_number % 3 == 0:
-                        print('updating base of FC')
-                        trainers[0].update()
-                    elif batch_number % 3 == 1:
-                        print('updating end of FC')
-                        trainers[1].update()
-                    else:
-                        assert batch_number % 3 == 2, batch_number % 3
-                        print('updating everything else')
-                        trainers[2].update()
+                    trainer.update()
                     batch_loss_value = batch_loss.scalar_value()
                     total_batch_loss += batch_loss_value
                     num_batches += 1
@@ -1083,7 +1074,7 @@ def run_train_question_bank_stanford_split(args):
             print("Saving new best model to {}...".format(best_dev_model_path))
             dy.save(best_dev_model_path, [parser])
 
-
+    wsj_indices = []
     for epoch in itertools.count(start=1):
 
         tree_indices = list(range(len(train_parses)))
@@ -1101,6 +1092,25 @@ def run_train_question_bank_stanford_split(args):
                 batch_losses.append(loss)
                 total_processed += 1
                 current_processed += 1
+
+            if args.train_on_wsj == 'true':
+                if not wsj_indices:
+                    wsj_indices = list(range(398))
+                    random.shuffle(wsj_indices)
+                wsj_batch_index = wsj_indices.pop()
+                h5f = h5py.File(
+                    'ptb_elmo_embeddings/train/batch_{}_embeddings.h5'.format(wsj_batch_index), 'r')
+                wsj_train_embeddings = dy.inputTensor(h5f['embeddings'][:, :, :])
+                h5f.close()
+                wsj_cur_word_index = 0
+                for index in range(wsj_batch_index * 100, wsj_batch_index * 100 + 100):
+                    tree = wsj_train[index]
+                    sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
+                    _, loss = parser.span_parser(sentence, is_train=True, gold=tree,
+                                                 elmo_embeddings=wsj_train_embeddings,
+                                                 cur_word_index=wsj_cur_word_index)
+                    wsj_cur_word_index += len(sentence)
+                    batch_losses.append(loss)
 
             batch_loss = dy.average(batch_losses)
             batch_loss_value = batch_loss.scalar_value()
@@ -2081,6 +2091,8 @@ def main():
     subparser.set_defaults(callback=run_train_question_bank_stanford_split)
     for arg in dynet_args:
         subparser.add_argument(arg)
+
+    subparser.add_argument("--train-on-wsj", required=True)
     subparser.add_argument("--tag-embedding-dim", type=int, default=50)
     subparser.add_argument("--word-embedding-dim", type=int, default=100)
     subparser.add_argument("--lstm-layers", type=int, default=2)
