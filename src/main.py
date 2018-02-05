@@ -731,13 +731,14 @@ def run_training_on_spans(args):
                     print("elmo weights", parser.elmo_weights.as_array())
                     batch_loss = dy.average(batch_losses)
                     batch_loss.backward()
-                    if batch_number % 6 == 0:
+                    if batch_number % 3 == 0:
                         print('updating base of FC')
                         trainers[0].update()
-                    elif batch_number % 6 == 1:
+                    elif batch_number % 3 == 1:
                         print('updating end of FC')
                         trainers[1].update()
                     else:
+                        assert batch_number % 3 == 2, batch_number % 3
                         print('updating everything else')
                         trainers[2].update()
                     batch_loss_value = batch_loss.scalar_value()
