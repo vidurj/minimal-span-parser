@@ -951,6 +951,9 @@ def run_test_qbank(args):
 
 
 def run_train_question_bank_stanford_split(args):
+    if not os.path.exists(args.expt_name):
+        os.mkdir(args.expt_name)
+
     all_parses = load_parses('questionbank/all_qb_trees.txt')
 
 
@@ -1075,9 +1078,22 @@ def run_train_question_bank_stanford_split(args):
             dy.save(best_dev_model_path, [parser])
 
     wsj_indices = []
-    for epoch in itertools.count(start=1):
-
+    if args.resample == 'true':
+        print('training on resampled data')
+        tree_indices = [random.randint(0, len(train_parses) - 1) for _ in range(len(train_parses))]
+    else:
+        print('training on original data')
         tree_indices = list(range(len(train_parses)))
+
+    if args.train_on_wsj == 'true':
+        print('training on wsj')
+    else:
+        print('not training on wsj')
+
+    with open(args.expt_name + '/train_tree_indices.txt', 'w') as f:
+        f.write('\n'.join([str(x) for x in tree_indices]))
+
+    for epoch in itertools.count(start=1):
         np.random.shuffle(tree_indices)
         epoch_start_time = time.time()
 
@@ -1881,26 +1897,28 @@ def collect_mistakes_on_qb(args):
     [parser] = dy.load(args.model_path_base, model)
 
     assert args.split == 'dev', args.split
-    test_path = 'questionbank/qbank.dev.trees'.format(args.split)
-    test_treebank = load_parses(test_path)
     test_embeddings = []
+
     if args.split == 'train':
-        indices = range(2000)
+        indices = list(range(0, 1000)) + list(range(2000, 3000))
     elif args.split == 'dev':
-        indices = range(2000, 3000)
+        indices = list(range(1000, 1500)) + list(range(3000, 3500))
     else:
         assert args.split == 'test', args.split
-        indices = range(3000, 4000)
+        indices = list(range(1500, 2000)) + list(range(3500, 4000))
 
     with h5py.File('question_bank_elmo_embeddings.hdf5', 'r') as h5f:
         for index in indices:
             test_embeddings.append(h5f[str(index)][:, :, :])
 
+    all_parses = load_parses('questionbank/all_qb_trees.txt')
+    test_parses = [all_parses[index] for index in indices]
+
     test_embeddings_np = np.swapaxes(np.concatenate(test_embeddings, axis=1), axis1=0, axis2=1)
 
     errors = []
     cur_word_index = 0
-    for dev_index, tree in enumerate(test_treebank):
+    for dev_index, tree in enumerate(test_parses):
         if dev_index % 100 == 0:
             dy.renew_cg()
             test_embeddings = dy.inputTensor(test_embeddings_np)
@@ -2093,6 +2111,9 @@ def main():
         subparser.add_argument(arg)
 
     subparser.add_argument("--train-on-wsj", required=True)
+    subparser.add_argument("--resample", required=True)
+    subparser.add_argument("--expt-name", required=True)
+    subparser.add_argument("--model-path-base", required=True)
     subparser.add_argument("--tag-embedding-dim", type=int, default=50)
     subparser.add_argument("--word-embedding-dim", type=int, default=100)
     subparser.add_argument("--lstm-layers", type=int, default=2)
@@ -2100,10 +2121,9 @@ def main():
     subparser.add_argument("--label-hidden-dim", type=int, default=250)
     subparser.add_argument("--split-hidden-dim", type=int, default=250)
     subparser.add_argument("--dropout", type=float, default=0.4)
-    subparser.add_argument("--model-path-base", required=True)
     subparser.add_argument("--evalb-dir", default="EVALB/")
     subparser.add_argument("--batch-size", type=int, default=100)
-    subparser.add_argument("--expt-name", required=True)
+
 
 
     subparser = subparsers.add_parser("train")
