@@ -1084,6 +1084,7 @@ def run_train_question_bank_stanford_split(args):
         print('training on resampled data')
         tree_indices = [random.randint(0, len(train_parses) - 1) for _ in range(len(train_parses))]
     elif args.num_samples != 'false':
+        print('restricting to', args.num_samples, 'samples')
         tree_indices = list(range(len(train_parses)))
         random.shuffle(tree_indices)
         tree_indices = tree_indices[:int(args.num_samples)]
@@ -1103,7 +1104,7 @@ def run_train_question_bank_stanford_split(args):
         np.random.shuffle(tree_indices)
         epoch_start_time = time.time()
 
-        for start_index in range(0, len(train_parses), args.batch_size):
+        for start_index in range(0, len(tree_indices), args.batch_size):
             dy.renew_cg()
             train_embeddings = dy.inputTensor(train_embeddings_np)
             batch_losses = []
@@ -1148,8 +1149,8 @@ def run_train_question_bank_stanford_split(args):
                 "epoch-elapsed {} "
                 "total-elapsed {}".format(
                     epoch,
-                    start_index // (args.batch_size + 1),
-                    int(np.ceil(len(train_parses) / (args.batch_size + 1))),
+                    start_index // args.batch_size,
+                    int(np.ceil(len(tree_indices) / args.batch_size)),
                     total_processed,
                     batch_loss_value,
                     format_elapsed(epoch_start_time),
@@ -1157,7 +1158,7 @@ def run_train_question_bank_stanford_split(args):
                 )
             )
 
-        if epoch % 3 == 0:
+        if epoch % 100 == 0:
             check_dev()
 
 def run_train_question_bank(args):
@@ -2488,6 +2489,7 @@ def main():
 
     subparser.add_argument("--train-on-wsj", required=True)
     subparser.add_argument("--resample", required=True)
+    subparser.add_argument("--num-samples", required=True)
     subparser.add_argument("--expt-name", required=True)
     subparser.add_argument("--model-path-base", required=True)
     subparser.add_argument("--tag-embedding-dim", type=int, default=50)
