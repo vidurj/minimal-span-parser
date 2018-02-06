@@ -124,7 +124,7 @@ def optimal_parser(label_log_probabilities_np,
                 gold_parse_log_likelihood += oracle_label_log_probability
                 confusion_matrix[(label, oracle_label)] += 1
 
-        choices, _ = resolve_conflicts_optimaly(greedily_chosen_spans)
+        choices, _ = resolve_conflicts_greedily(greedily_chosen_spans)
         span_to_label = {}
         predicted_parse_log_likelihood = np.sum(label_log_probabilities_np[empty_label_index, :])
         adjusted = label_log_probabilities_np - label_log_probabilities_np[empty_label_index, :]
@@ -269,7 +269,7 @@ class TopDownParser(object):
         #     label_scores_reshaped = dy.cmult(dy.logistic(dy.cmult(label_scores_reshaped, temp) + alpha[1]), lmbd) + alpha[2]
         # 990.51641846]] [ 0.03124614  4.00097179 -9.43100834
         # label_scores_reshaped = dy.logistic(label_scores_reshaped * 0.03124614 + 4.00097179) * 990.51641846 - 9.43100834
-        return dy.log_softmax(label_scores_reshaped)
+        return dy.log_softmax(0.6 * label_scores_reshaped)
 
     def train_on_partial_annotation(self, sentence, annotations, elmo_vecs, cur_word_index):
         if len(annotations) == 0:
@@ -304,11 +304,9 @@ class TopDownParser(object):
                 span_to_index[(start, end)] = len(encodings)
                 encodings.append(self._get_span_encoding(start, end, lstm_outputs))
 
-        label_log_probabilities_np = self._encodings_to_label_log_probabilities(
-            encodings).npvalue()
-        non_constituent_probabilities = np.exp(
-            label_log_probabilities_np[self.empty_label_index, :])
-        label_log_probabilities_np = np.log(np.array([non_constituent_probabilities, 1 - non_constituent_probabilities]))
+        label_log_probabilities_np = self._encodings_to_label_log_probabilities(encodings).npvalue()
+        non_constituent_probabilities = np.exp(label_log_probabilities_np[self.empty_label_index, :])
+        label_log_probabilities_np = np.log(10 ** -6 + np.array([non_constituent_probabilities, 1 - non_constituent_probabilities]))
         return (label_log_probabilities_np, span_to_index)
 
     def produce_parse_forest(self, sentence, required_probability_mass):

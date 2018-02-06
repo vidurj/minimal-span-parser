@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import itertools
 import os.path
 import pickle
@@ -1079,8 +1080,13 @@ def run_train_question_bank_stanford_split(args):
 
     wsj_indices = []
     if args.resample == 'true':
+        assert args.num_samples == 'false'
         print('training on resampled data')
         tree_indices = [random.randint(0, len(train_parses) - 1) for _ in range(len(train_parses))]
+    elif args.num_samples != 'false':
+        tree_indices = list(range(len(train_parses)))
+        random.shuffle(tree_indices)
+        tree_indices = tree_indices[:int(args.num_samples)]
     else:
         print('training on original data')
         tree_indices = list(range(len(train_parses)))
@@ -1151,7 +1157,8 @@ def run_train_question_bank_stanford_split(args):
                 )
             )
 
-        check_dev()
+        if epoch % 3 == 0:
+            check_dev()
 
 def run_train_question_bank(args):
     train_path = 'questionbank/qbank.train.trees'
@@ -1603,9 +1610,9 @@ def compute_string(tree):
     return tree_to_string[tree]
 
 def compute_kbest_f1(args):
-    sizes = [1, 5, 10, 15, 20, 50, 100, 200, 300, 400, 500]
-    sizes.sort()
-    sizes = [x for x in sizes if x <= args.num_trees]
+    if not os.path.exists(args.expt_name):
+        os.mkdir(args.expt_name)
+
     test_parses = load_parses(args.test_path)
     print("Loaded {:,} test examples.".format(len(test_parses)))
     num_excess_trees = len(test_parses) % 100
@@ -1626,36 +1633,47 @@ def compute_kbest_f1(args):
     data = []
     num_cpus = multiprocessing.cpu_count()
     pool = multiprocessing.Pool()
-    for index, tree in enumerate(test_parses):
-        if index % 100 == 0:
-            dy.renew_cg()
-            cur_word_index = 0
-            batch_number = int(index / 100)
-            embedding_file_name = 'ptb_elmo_embeddings/{}/batch_{}_embeddings.h5'.format(file_name,
-                                                                                         batch_number)
-            h5f = h5py.File(embedding_file_name, 'r')
-            embedding_array = h5f['embeddings'][:, :, :]
-            elmo_embeddings = dy.inputTensor(embedding_array)
-            h5f.close()
-            print(index)
-        sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-        (label_log_probabilities_np, span_to_index) = parser.get_distribution_for_kbest(sentence, elmo_embeddings, cur_word_index)
-        cur_word_index += len(sentence)
-        data.append((sentence, args.num_trees, label_log_probabilities_np, span_to_index))
+    text = args.expt_name + args.test_path + args.model_path_base
+    hash = hashlib.md5(text.encode('utf-8')).hexdigest()
+    print(hash, str(args))
+    data_file_path = 'hash-' + hash + '.pickle'
+    if os.path.isfile(data_file_path):
+        print('loading from cache', data_file_path)
+        with open(data_file_path, 'rb') as f:
+            data = pickle.load(f)
+    else:
+        for index, tree in enumerate(test_parses):
+            if index % 100 == 0:
+                dy.renew_cg()
+                cur_word_index = 0
+                batch_number = int(index / 100)
+                embedding_file_name = 'ptb_elmo_embeddings/{}/batch_{}_embeddings.h5'.format(file_name,
+                                                                                             batch_number)
+                h5f = h5py.File(embedding_file_name, 'r')
+                embedding_array = h5f['embeddings'][:, :, :]
+                elmo_embeddings = dy.inputTensor(embedding_array)
+                h5f.close()
+                print(index)
+            sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
+            (label_log_probabilities_np, span_to_index) = parser.get_distribution_for_kbest(sentence, elmo_embeddings, cur_word_index)
+            cur_word_index += len(sentence)
+            data.append((sentence, args.num_trees, label_log_probabilities_np, span_to_index))
+        with open(data_file_path, 'wb') as f:
+            pickle.dump(data, f)
 
     responses = pool.map(kbest, data, chunksize=int(math.floor(len(data) / num_cpus)))
-    all_scores = []
+    tree_loglikelihoods = []
     predicted_acc = []
     gold_acc = []
     num_trees = []
-    for (tree, (predicted_trees, scores)) in zip(test_parses, responses):
+    for (tree, (predicted_trees, loglikelihoods)) in zip(test_parses, responses):
         # assert len(predicted_trees_and_scores) == args.num_trees, (sentence, len(predicted_trees_and_scores))
         # predicted, additional_info, _ = parser.span_parser(sentence, is_train=False, gold=tree)
         gold_treebank_tree = tree.convert()
         predicted_acc.extend(predicted_trees)
         gold_acc.extend([gold_treebank_tree for _ in predicted_trees])
-        all_scores.extend(scores)
-        assert len(predicted_trees) == len(scores)
+        tree_loglikelihoods.extend(loglikelihoods)
+        assert len(predicted_trees) == len(loglikelihoods)
         num_trees.append(len(predicted_trees))
 
     evaluate.evalb(args.evalb_dir, gold_acc, predicted_acc, args=args,
@@ -1664,24 +1682,41 @@ def compute_kbest_f1(args):
     with open(file_path, 'r') as f:
         text = f.read().strip().splitlines()
     flag = False
-    size_to_scores = {}
-    for size in sizes:
-        size_to_scores[size] = []
+    forest_sizes = list(range(1, 500))
+    forest_sizes = [x for x in forest_sizes if x <= args.num_trees]
+    forest_sizes.sort()
+    forest_size_to_scores = {}
+    for k in forest_sizes:
+        forest_size_to_scores[k] = []
+
+    forest_size_to_ks = {}
+    for k in forest_sizes:
+        forest_size_to_ks[k] = []
 
     thresholds = [0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
     thresholds.sort()
-    threshold_to_scores = {}
-    for threshold in thresholds:
-        threshold_to_scores[threshold] = []
-    ks_to_ks = {}
-    for ks in sizes:
-        ks_to_ks[ks] = []
-    threshold_to_ks = {}
-    for threshold in threshold_to_scores.keys():
-        threshold_to_ks[threshold] = []
+    threshold_to_scores = defaultdict(list)
+    threshold_to_ks = defaultdict(list)
+
+    all_loglikelihoods = [x for _, loglikelihoods in responses for x in loglikelihoods[1:]]
+    all_loglikelihoods.sort(key = lambda x: -x)
+    k_to_optimal_cutoff = {}
+    for k in forest_sizes:
+        index = (k - 1) * len(test_parses) + 1
+        if index < 0:
+            print(k, index, 'index less than zero')
+            continue
+        elif index >= len(all_loglikelihoods):
+            index = len(all_loglikelihoods) - 1
+            print(k, index, 'index larger than list')
+
+        k_to_optimal_cutoff[k] = math.exp(all_loglikelihoods[index])
+
+    k_to_scores = defaultdict(list)
+    k_to_counts = defaultdict(list)
+    k_to_max_tree_number = defaultdict(lambda: -1)
     buffer = []
     buffer_probability = 0
-    cur_index = 0
     cur_tree_number = 0
     for line in text:
         if line == '============================================================================':
@@ -1699,29 +1734,41 @@ def compute_kbest_f1(args):
             else:
                 f1 = 2 / (1 / precision + 1 / recall)
             buffer.append((matched_brackets, gold_brackets, predicted_brackets, f1))
-            print(all_scores[cur_index])
-            probability = math.exp(all_scores[cur_index])
-            cur_index += 1
+            probability = math.exp(tree_loglikelihoods.pop(0))
             old_buffer_probability = buffer_probability
             buffer_probability += probability
 
-            best_score = max(buffer, key=lambda x: x[3])
+            best_f1 = max(buffer, key=lambda x: x[3])
 
-            if len(buffer) in size_to_scores:
-                size_to_scores[len(buffer)].append(best_score)
+            if len(buffer) == 1:
+                for k in forest_sizes:
+                    k_to_scores[k].append(best_f1)
+                    k_to_counts[k].append(len(buffer))
+            else:
+                for k in forest_sizes:
+                    if k in k_to_optimal_cutoff and probability > k_to_optimal_cutoff[k]:
+                        k_to_scores[k][-1] = best_f1
+                        k_to_counts[k][-1] = len(buffer)
+
+            if len(buffer) in forest_size_to_scores:
+                forest_size_to_scores[len(buffer)].append(best_f1)
+                forest_size_to_ks[len(buffer)].append(len(buffer))
 
             for threshold in thresholds:
                 if old_buffer_probability < threshold <= buffer_probability:
-                    threshold_to_scores[threshold].append(best_score)
+                    threshold_to_scores[threshold].append(best_f1)
                     threshold_to_ks[threshold].append(len(buffer))
 
-            # Must be num_trees since we are generating num_trees and we will be out of alignment
+
             if len(buffer) == num_trees[cur_tree_number]:
-                for threshold in thresholds:
-                    if buffer_probability < threshold:
-                        print(threshold, 'was too high for', args.num_trees, 'trees')
-                        threshold_to_scores[threshold].append(best_score)
-                        threshold_to_ks[threshold].append(len(buffer))
+                # for threshold in thresholds:
+                #     if buffer_probability < threshold:
+                #         threshold_to_scores[threshold].append(best_f1)
+                #         threshold_to_ks[threshold].append(len(buffer))
+                for forest_size, scores in forest_size_to_scores.items():
+                    if len(buffer) < forest_size:
+                        scores.append(best_f1)
+                        forest_size_to_ks[forest_size].append(len(buffer))
                 buffer = []
                 buffer_probability = 0
                 cur_tree_number += 1
@@ -1738,22 +1785,36 @@ def compute_kbest_f1(args):
               'recall:', recall,
               'f1:', f1,
               'complete match fraction:', complete_match_fraction,
-              'num sentences:')
+              'num sentences:', len(best_scores))
         with open(name + '.pickle', 'wb') as f:
             pickle.dump(best_scores, f)
 
-
-    for size in sizes:
+    for size in forest_sizes:
+        if size not in k_to_optimal_cutoff:
+            continue
         print(size)
-        if len(size_to_scores[size]) != len(test_parses):
-            print(size, 'has only', len(size_to_scores[size]), 'instances instead of', len(test_parses))
-        print_stats(size_to_scores[size], 'k_equals_' + str(size))
+        # assert len(forest_size_to_scores[size]) == len(test_parses)
+        # assert len(forest_size_to_ks[size]) == len(test_parses)
+        print('avg k', np.mean(k_to_counts[size]))
+        print_stats(k_to_scores[size], 'k_equals_' + str(size))
         print('-' * 50)
 
-    for probability in threshold_to_scores.keys():
+    print('*' * 100)
+
+    for size in forest_sizes:
+        print(size)
+        # assert len(forest_size_to_scores[size]) == len(test_parses)
+        # assert len(forest_size_to_ks[size]) == len(test_parses)
+        print('avg k', np.mean(forest_size_to_ks[size]))
+        print_stats(forest_size_to_scores[size], 'k_equals_' + str(size))
+        print('-' * 50)
+
+    print('*' * 100)
+
+    for probability in thresholds:
         print('threshold', probability)
-        assert len(threshold_to_ks[probability]) == len(test_parses)
-        assert len(threshold_to_scores[probability]) == len(test_parses)
+        # assert len(threshold_to_ks[probability]) == len(test_parses)
+        # assert len(threshold_to_scores[probability]) == len(test_parses)
         print('avg k', np.mean(threshold_to_ks[probability]))
         print_stats(threshold_to_scores[probability], 'probability_mass_' + str(probability))
         print('-' * 50)
@@ -1887,6 +1948,310 @@ def run_test(args):
         pickle.dump(total_confusion_matrix, f)
 
 
+def compute_kbest_f1_bagged_qb(args):
+
+    sizes = [1, 5, 10, 15, 20, 50, 100, 200, 300, 400, 500]
+    sizes.sort()
+    sizes = [x for x in sizes if x <= args.num_trees]
+
+
+
+    if not os.path.exists(args.expt_name):
+        os.mkdir(args.expt_name)
+
+    print("Loading model from {}...".format(args.model_path_base))
+    meta_model = dy.ParameterCollection()
+    parsers = []
+    num_parsers = 10
+    for i in range(1, num_parsers + 1):
+        model = meta_model.add_subcollection('model_' + str(i))
+        relevant_files = [f[:-5] for f in os.listdir(str(i)) if f.startswith('model') and 'latest' not in f and f.endswith('.data')]
+        model_file = max(relevant_files, key=lambda x: len(x))
+        print('loading model for', i, 'from', file)
+        [parser] = dy.load(model_file, model)
+        parsers.append(parser)
+
+    assert args.split == 'dev', args.split
+    test_embeddings = []
+
+    if args.split == 'train':
+        indices = list(range(0, 1000)) + list(range(2000, 3000))
+    elif args.split == 'dev':
+        indices = list(range(1000, 1500)) + list(range(3000, 3500))
+    else:
+        assert args.split == 'test', args.split
+        indices = list(range(1500, 2000)) + list(range(3500, 4000))
+
+    with h5py.File('question_bank_elmo_embeddings.hdf5', 'r') as h5f:
+        for index in indices:
+            test_embeddings.append(h5f[str(index)][:, :, :])
+
+    all_parses = load_parses('questionbank/all_qb_trees.txt')
+    test_parses = [all_parses[index] for index in indices]
+
+    test_embeddings_np = np.swapaxes(np.concatenate(test_embeddings, axis=1), axis1=0, axis2=1)
+
+    print("Parsing test sentences...")
+    data_from_parsers = [[] for _ in range(11)]
+    num_cpus = multiprocessing.cpu_count()
+    pool = multiprocessing.Pool()
+    cur_word_index = 0
+    for index, tree in enumerate(test_parses):
+        if index % 100 == 0:
+            dy.renew_cg()
+            test_embeddings = dy.inputTensor(test_embeddings_np)
+            h5f.close()
+            print(index)
+        sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
+        meta_label_probabilities = None
+        for parser_number in range(num_parsers):
+            parser = parsers[parser_number]
+            span_to_index, label_log_probabilities = parser.compute_label_distributions(
+                sentence,
+                is_train=False,
+                elmo_embeddings=test_embeddings,
+                cur_word_index=cur_word_index)
+            label_log_probabilities_np = label_log_probabilities.npvalue()
+            data_from_parsers[parser_number].append((sentence, args.num_trees, label_log_probabilities_np, span_to_index))
+            if parser_number == 0:
+                meta_label_probabilities = np.exp(label_log_probabilities_np)
+            else:
+                meta_label_probabilities += np.exp(label_log_probabilities_np)
+
+        meta_label_probabilities /= len(parsers)
+        meta_label_log_probabilities = np.log(meta_label_probabilities)
+        data_from_parsers[num_parsers].append((sentence, args.num_trees, meta_label_log_probabilities, span_to_index))
+        cur_word_index += len(sentence)
+
+
+    responses = []
+    for data in data_from_parsers:
+        responses.append(pool.map(kbest, data, chunksize=int(math.floor(len(data) / num_cpus))))
+    all_scores = []
+    predicted_acc = []
+    gold_acc = []
+    num_trees = []
+    for (tree, (predicted_trees, scores)) in zip(test_parses, responses):
+        # assert len(predicted_trees_and_scores) == args.num_trees, (sentence, len(predicted_trees_and_scores))
+        # predicted, additional_info, _ = parser.span_parser(sentence, is_train=False, gold=tree)
+        gold_treebank_tree = tree.convert()
+        predicted_acc.extend(predicted_trees)
+        gold_acc.extend([gold_treebank_tree for _ in predicted_trees])
+        all_scores.extend(scores)
+        assert len(predicted_trees) == len(scores)
+        num_trees.append(len(predicted_trees))
+
+    evaluate.evalb(args.evalb_dir, gold_acc, predicted_acc, args=args,
+                                 name="bestk", flatten=True, erase_labels=True)
+    file_path = os.path.join(args.expt_name, 'bestk-output.txt')
+    with open(file_path, 'r') as f:
+        text = f.read().strip().splitlines()
+    flag = False
+    size_to_scores = {}
+    for size in sizes:
+        size_to_scores[size] = []
+
+    thresholds = [0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
+    thresholds.sort()
+    threshold_to_scores = {}
+    for threshold in thresholds:
+        threshold_to_scores[threshold] = []
+    ks_to_ks = {}
+    for ks in sizes:
+        ks_to_ks[ks] = []
+    threshold_to_ks = {}
+    for threshold in threshold_to_scores.keys():
+        threshold_to_ks[threshold] = []
+    buffer = []
+    buffer_probability = 0
+    cur_index = 0
+    cur_tree_number = 0
+    for line in text:
+        if line == '============================================================================':
+            if flag:
+                assert buffer == [], len(buffer)
+                break
+            flag = True
+        elif flag:
+            tokens = line.split()
+            matched_brackets, gold_brackets, predicted_brackets = [int(x) for x in tokens[5:8]]
+            precision = matched_brackets / predicted_brackets
+            recall = matched_brackets / gold_brackets
+            if matched_brackets == 0:
+                f1 = 0
+            else:
+                f1 = 2 / (1 / precision + 1 / recall)
+            buffer.append((matched_brackets, gold_brackets, predicted_brackets, f1))
+            print(all_scores[cur_index])
+            probability = math.exp(all_scores[cur_index])
+            cur_index += 1
+            old_buffer_probability = buffer_probability
+            buffer_probability += probability
+
+            best_score = max(buffer, key=lambda x: x[3])
+
+            if len(buffer) in size_to_scores:
+                size_to_scores[len(buffer)].append(best_score)
+
+            for threshold in thresholds:
+                if old_buffer_probability < threshold <= buffer_probability:
+                    threshold_to_scores[threshold].append(best_score)
+                    threshold_to_ks[threshold].append(len(buffer))
+
+            # Must be num_trees since we are generating num_trees and we will be out of alignment
+            if len(buffer) == num_trees[cur_tree_number]:
+                for threshold in thresholds:
+                    if buffer_probability < threshold:
+                        print(threshold, 'was too high for', args.num_trees, 'trees')
+                        threshold_to_scores[threshold].append(best_score)
+                        threshold_to_ks[threshold].append(len(buffer))
+                buffer = []
+                buffer_probability = 0
+                cur_tree_number += 1
+
+    def print_stats(best_scores, name):
+        total_matched_brackets = np.sum([x[0] for x in best_scores])
+        total_gold_brackets = np.sum([x[1] for x in best_scores])
+        total_predicted_brackets = np.sum([x[2] for x in best_scores])
+        complete_match_fraction = np.mean([x == y == z for x, y, z, _ in best_scores])
+        recall = total_matched_brackets / total_gold_brackets
+        precision = total_matched_brackets / total_predicted_brackets
+        f1 = 2 / (1 / precision + 1 / recall)
+        print('precision:', precision,
+              'recall:', recall,
+              'f1:', f1,
+              'complete match fraction:', complete_match_fraction,
+              'num sentences:')
+        with open(name + '.pickle', 'wb') as f:
+            pickle.dump(best_scores, f)
+
+
+    for size in sizes:
+        print(size)
+        if len(size_to_scores[size]) != len(test_parses):
+            print(size, 'has only', len(size_to_scores[size]), 'instances instead of', len(test_parses))
+        print_stats(size_to_scores[size], 'k_equals_' + str(size))
+        print('-' * 50)
+
+    for probability in threshold_to_scores.keys():
+        print('threshold', probability)
+        assert len(threshold_to_ks[probability]) == len(test_parses)
+        assert len(threshold_to_scores[probability]) == len(test_parses)
+        print('avg k', np.mean(threshold_to_ks[probability]))
+        print_stats(threshold_to_scores[probability], 'probability_mass_' + str(probability))
+        print('-' * 50)
+
+
+def collect_mistakes_on_qb_bagged(args):
+    if not os.path.exists(args.expt_name):
+        os.mkdir(args.expt_name)
+
+    meta_model = dy.ParameterCollection()
+    parsers = []
+    for i in range(1, 11):
+        model = meta_model.add_subcollection('model' + str(i))
+        relevant_files = [f[:-5] for f in os.listdir(str(i)) if f.startswith('model') and 'latest' not in f and f.endswith('.data')]
+        model_file = max(relevant_files, key=lambda x: len(x))
+        print('loading model for', i, 'from', model_file)
+        [parser] = dy.load(str(i) + '/' + model_file, model)
+        parsers.append(parser)
+
+    assert args.split == 'dev', args.split
+    test_embeddings = []
+
+    if args.split == 'train':
+        indices = list(range(0, 1000)) + list(range(2000, 3000))
+    elif args.split == 'dev':
+        indices = list(range(1000, 1500)) + list(range(3000, 3500))
+    else:
+        assert args.split == 'test', args.split
+        indices = list(range(1500, 2000)) + list(range(3500, 4000))
+
+    with h5py.File('question_bank_elmo_embeddings.hdf5', 'r') as h5f:
+        for index in indices:
+            test_embeddings.append(h5f[str(index)][:, :, :])
+
+    all_parses = load_parses('questionbank/all_qb_trees.txt')
+    test_parses = [all_parses[index] for index in indices]
+
+    test_embeddings_np = np.swapaxes(np.concatenate(test_embeddings, axis=1), axis1=0, axis2=1)
+
+    errors = []
+    cur_word_index = 0
+    total_log_likelihood = 0
+    predicted_treebank = []
+    for dev_index, tree in enumerate(test_parses):
+        if dev_index % 100 == 0:
+            dy.renew_cg()
+            test_embeddings = dy.inputTensor(test_embeddings_np)
+        sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
+        sentence_str = ' '.join([word for tag, word in sentence])
+        words = [word for pos, word in sentence]
+        span_to_index, _label_log_probabilities = parsers[0].compute_label_distributions(sentence,
+                                                                                  is_train=False,
+                                                                                  elmo_embeddings=test_embeddings,
+                                                                                  cur_word_index=cur_word_index)
+        meta_label_probabilities = np.exp(_label_log_probabilities.npvalue())
+        for parser in parsers[1:]:
+            _, label_probabilities = parser.compute_label_distributions(
+                sentence,
+                is_train=False,
+                elmo_embeddings=test_embeddings,
+                cur_word_index=cur_word_index)
+            meta_label_probabilities += np.exp(_label_log_probabilities.npvalue())
+
+        meta_label_probabilities /= len(parsers)
+        meta_label_log_probabilities = np.log(meta_label_probabilities)
+        cur_word_index += len(sentence)
+        span_to_label = get_all_spans(tree)
+
+        predicted_tree, additional_info = parse.optimal_parser(meta_label_log_probabilities,
+                                                      span_to_index,
+                                                      sentence,
+                                                      parser.empty_label_index,
+                                                      parser.label_vocab,
+                                                      tree)
+        predicted_treebank.append(predicted_tree.convert())
+        total_log_likelihood += additional_info[-1]
+        predicted_parse_string = predicted_tree.convert().linearize()
+        gold_parse_string = tree.convert().linearize()
+
+        worst_error_prob = None
+        worst_error_string = None
+        worst_error_gold_label = None
+        for span, label in span_to_label.items():
+            label_index = parser.label_vocab.index(label)
+            span_index = span_to_index[span]
+            nc_prob = meta_label_probabilities[parser.empty_label_index, span_index]
+
+            if label_index == parser.empty_label_index:
+                prob = nc_prob
+            else:
+                prob = 1 - nc_prob
+            if worst_error_prob is None or prob < worst_error_prob:
+                worst_error_prob = prob
+                worst_error_string = ' '.join(words[span[0]:span[1]])
+                if label == ():
+                    worst_error_gold_label = 'NC'
+                else:
+                    worst_error_gold_label = ' '.join(label)
+
+
+        errors.append((sentence_str, gold_parse_string, predicted_parse_string, worst_error_string, worst_error_gold_label, str(worst_error_prob)))
+
+    print('total loglikelihood', total_log_likelihood)
+    keys = ['sentence', 'gold parse', 'pred parse', 'span text', 'span gold label', 'span gold label probability']
+    errors.sort(key=lambda x: x[0])
+    error_string = ""
+    for lines in errors:
+        formatted_lines = [x + ': ' + y for x, y in zip(keys, lines)]
+        error_string += '\n'.join(formatted_lines) + '\n***\n'
+    with open(args.expt_name + '-errors.txt', 'w') as f:
+        f.write(error_string)
+    dev_fscore = evaluate.evalb('EVALB/', [tree.convert() for tree in test_parses], predicted_treebank, args=args,
+                                name="dev-regular")
+    print(dev_fscore)
+
 
 def collect_mistakes_on_qb(args):
     if not os.path.exists(args.expt_name):
@@ -1918,6 +2283,8 @@ def collect_mistakes_on_qb(args):
 
     errors = []
     cur_word_index = 0
+    total_loglikelihood = 0
+    predicted_treebank = []
     for dev_index, tree in enumerate(test_parses):
         if dev_index % 100 == 0:
             dy.renew_cg()
@@ -1933,13 +2300,14 @@ def collect_mistakes_on_qb(args):
         cur_word_index += len(sentence)
         span_to_label = get_all_spans(tree)
 
-        predicted_tree, _ = parse.optimal_parser(label_log_probabilities,
+        predicted_tree, additional_info = parse.optimal_parser(label_log_probabilities,
                                                       span_to_index,
                                                       sentence,
                                                       parser.empty_label_index,
                                                       parser.label_vocab,
                                                       tree)
-
+        predicted_treebank.append(predicted_tree.convert())
+        total_loglikelihood += additional_info[-1]
         predicted_parse_string = predicted_tree.convert().linearize()
         gold_parse_string = tree.convert().linearize()
 
@@ -1965,7 +2333,7 @@ def collect_mistakes_on_qb(args):
 
 
         errors.append((sentence_str, gold_parse_string, predicted_parse_string, worst_error_string, worst_error_gold_label, str(worst_error_prob)))
-
+    print('total loglikelihood', total_loglikelihood)
     keys = ['sentence', 'gold parse', 'pred parse', 'span text', 'span gold label', 'span gold label probability']
     errors.sort(key=lambda x: x[0])
     error_string = ""
@@ -1974,6 +2342,10 @@ def collect_mistakes_on_qb(args):
         error_string += '\n'.join(formatted_lines) + '\n***\n'
     with open(args.expt_name + '-errors.txt', 'w') as f:
         f.write(error_string)
+    dev_fscore = evaluate.evalb('EVALB/', [tree.convert() for tree in test_parses],
+                                predicted_treebank, args=args,
+                                name="dev-regular")
+    print(dev_fscore)
 
 
 def collect_mistakes(args):
@@ -1991,6 +2363,7 @@ def collect_mistakes(args):
 
     print("Parsing test sentences...")
     errors = []
+    ks = [0 for _ in range(parser.label_vocab.size + 10)]
     for tree_index, tree in enumerate(parses):
         if tree_index % 100 == 0:
             dy.renew_cg()
@@ -2003,6 +2376,7 @@ def collect_mistakes(args):
             h5f.close()
             print(tree_index)
         sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
+        sentence_str = ' '.join([word for tag, word in sentence])
         words = [word for pos, word in sentence]
         span_to_index, label_log_probabilities = parser.compute_label_distributions(sentence,
                                                                                   is_train=False,
@@ -2029,7 +2403,9 @@ def collect_mistakes(args):
             label_index = parser.label_vocab.index(label)
             span_index = span_to_index[span]
             nc_prob = math.exp(label_log_probabilities[parser.empty_label_index, span_index])
-
+            if math.exp(np.max(label_log_probabilities[:, span_index])) < 0.5:
+                k = np.sum(label_log_probabilities[:, span_index] > label_log_probabilities[label_index, span_index])
+                ks[int(k)] += 1
             if label_index == parser.empty_label_index:
                 prob = nc_prob
             else:
@@ -2043,15 +2419,15 @@ def collect_mistakes(args):
                     worst_error_gold_label = ' '.join(label)
 
 
-        errors.append((gold_parse_string, predicted_parse_string, worst_error_string, worst_error_gold_label, str(worst_error_prob)))
-
-    keys = ['gold parse', 'pred parse', 'span text', 'span gold label', 'span gold label probability']
+        errors.append((sentence_str, gold_parse_string, predicted_parse_string, worst_error_string, worst_error_gold_label, str(worst_error_prob)))
+    print(ks)
+    keys = ['sentence', 'gold parse', 'pred parse', 'span text', 'span gold label', 'span gold label probability']
     errors.sort(key=lambda x: x[0])
     error_string = ""
     for lines in errors:
         formatted_lines = [x + ': ' + y for x, y in zip(keys, lines)]
         error_string += '\n'.join(formatted_lines) + '\n***\n'
-    with open(args.expt_name + '/errors.txt', 'w') as f:
+    with open(args.expt_name + '-errors.txt', 'w') as f:
         f.write(error_string)
 
 
@@ -2182,6 +2558,14 @@ def main():
 
     subparser = subparsers.add_parser("collect-errors-on-qb")
     subparser.set_defaults(callback=collect_mistakes_on_qb)
+    for arg in dynet_args:
+        subparser.add_argument(arg)
+    subparser.add_argument("--model-path-base", required=True)
+    subparser.add_argument("--expt-name", required=True)
+    subparser.add_argument("--split", default='dev')
+
+    subparser = subparsers.add_parser("collect-errors-on-qb-bagged")
+    subparser.set_defaults(callback=collect_mistakes_on_qb_bagged)
     for arg in dynet_args:
         subparser.add_argument(arg)
     subparser.add_argument("--model-path-base", required=True)
