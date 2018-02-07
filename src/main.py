@@ -20,6 +20,7 @@ from collections import defaultdict
 import h5py
 import json
 from sortedcontainers import SortedList
+import spacy
 
 
 
@@ -101,34 +102,6 @@ def produce_data_for_seq_to_seq(_):
     write_seq_to_seq_data('data/train.trees', 'seq2seq-train.txt')
     write_seq_to_seq_data('data/dev.trees', 'seq2seq-dev.txt')
     write_seq_to_seq_data('data/test.trees', 'seq2seq-test.txt')
-
-
-def parse_sentences(args):
-    import spacy
-    nlp = spacy.load('en')
-    parser, _ = load_or_create_model(args, parses_for_vocab=None)
-    with open(args.file_path, 'r') as f:
-        sentences = f.read().splitlines()
-    parses = []
-    print(parser.tag_vocab.indices)
-    for sentence in sentences:
-        if len(parses) % 100 == 0:
-            print(len(parses))
-            dy.renew_cg()
-        tokens = []
-        for token in nlp(sentence):
-            tag = token.tag_
-            if tag == "-LRB-" or tag == "-RRB-":
-                tag = tag[1:-1]
-            if tag not in parser.tag_vocab.indices:
-                print(tag, token.text)
-            else:
-                tokens.append((tag, token.text.replace('(', 'LRB').replace(')', 'RRB')))
-        parse, _ = parser.span_parser(tokens, is_train=False)
-        parse = parse.convert().linearize()
-        parses.append(parse)
-    with open('parses.txt', 'w') as f:
-        f.write('\n'.join(parses))
 
 
 def run_span_picking(args):
@@ -949,6 +922,85 @@ def run_test_qbank(args):
                                  name="regular")
 
     print("regular", test_fscore)
+
+
+
+def parse_file(args):
+    if not os.path.exists(args.expt_name):
+        os.mkdir(args.expt_name)
+
+    model = dy.ParameterCollection()
+    [parser] = dy.load(args.model_path_base, model)
+
+    with open(args.input_file, 'r') as f:
+        lines = f.read().splitlines()
+    sentences_with_pos = []
+    nlp = spacy.load('en')
+    tokenized_lines = []
+    for line in lines:
+        sentence_with_pos = []
+        tokens = nlp(line)
+        tokenized_line = ""
+        for token in tokens:
+            tag = token.tag_
+            if tag == "-LRB-" or tag == "-RRB-":
+                tag = tag[1:-1]
+            elif tag == 'HYPH':
+                tag = ':'
+            if tag not in parser.tag_vocab.indices:
+                print(tag, token.text)
+            else:
+                word = token.text.replace('(', 'LRB').replace(')', 'RRB')
+                sentence_with_pos.append((tag, word))
+                tokenized_line += word + " "
+
+        sentences_with_pos.append(sentence_with_pos)
+        tokenized_lines.append(tokenized_line.strip())
+
+    tokenized_sentences_file_path = os.getcwd() + '/' + args.expt_name + '/tokenized_sentences.txt'
+    elmo_embeddings_file_path = os.getcwd() + '/' + args.expt_name + '/elmo.hd5'
+
+    with open(tokenized_sentences_file_path, 'w') as f:
+        f.write('\n'.join(tokenized_lines))
+
+    generate_elmo_vectors = '/home/vidurj/miniconda3/envs/allennlp/bin/python3 ' \
+                            '/home/vidurj/allennlp/scripts/write_elmo_representations_to_file.py ' \
+                            '--options_file "/home/vidurj/allennlp/scripts/elmo_options.json" --weight_file "/home/vidurj/allennlp/scripts/weights.hdf5" --input_file "{}" --output_file "{}"'.format(
+        tokenized_sentences_file_path, elmo_embeddings_file_path)
+    print(generate_elmo_vectors)
+    return_code = os.system(generate_elmo_vectors)
+    assert return_code == 0, return_code
+
+    elmo_embeddings_np = []
+    with h5py.File(elmo_embeddings_file_path, 'r') as h5f:
+        for index in range(len(tokenized_lines)):
+            elmo_embeddings_np.append(h5f[str(index)][:, :, :])
+
+    elmo_embeddings_np = np.swapaxes(np.concatenate(elmo_embeddings_np, axis=1), axis1=0, axis2=1)
+
+    cur_word_index = 0
+    output_string = ""
+    for index, sentence_with_pos in enumerate(sentences_with_pos):
+        if index % 100 == 0:
+            dy.renew_cg()
+            elmo_embeddings = dy.inputTensor(elmo_embeddings_np)
+
+        if args.simple:
+            parse, _ = parser.span_parser(sentence_with_pos, is_train=False, elmo_embeddings=elmo_embeddings, cur_word_index=cur_word_index)
+            output_string += parse.convert().linearize() + '\n'
+        else:
+            (label_log_probabilities_np, span_to_index) = parser.get_distribution_for_kbest(sentence_with_pos,
+                                                                                            elmo_embeddings,
+                                                                                            cur_word_index)
+            parses, scores = kbest((sentence_with_pos, int(args.num_parses), label_log_probabilities_np, span_to_index))
+            output_string += '\n' + tokenized_lines[index] + '\n\n'
+            for parse, score in zip(parses, scores):
+                output_string += str(math.exp(score)) + '\n' + parse.linearize() + '\n'
+            output_string += '*' * 70 + '\n'
+        cur_word_index += len(sentence_with_pos)
+    with open(args.expt_name + '/output.txt', 'w') as f:
+        f.write(output_string)
+
 
 
 def run_train_question_bank_stanford_split(args):
@@ -2450,6 +2502,16 @@ def main():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers()
 
+    subparser = subparsers.add_parser("parse-file")
+    subparser.set_defaults(callback=parse_file)
+    for arg in dynet_args:
+        subparser.add_argument(arg)
+    subparser.add_argument("--num-parses", type=int, default=10)
+    subparser.add_argument("--input-file", required=True)
+    subparser.add_argument("--model-path-base", required=True)
+    subparser.add_argument("--expt-name", required=True)
+    subparser.add_argument("--simple", action="store_true")
+
     subparser = subparsers.add_parser("train-wsj-qb")
     subparser.set_defaults(callback=run_train_question_bank_and_wsj)
     for arg in dynet_args:
@@ -2653,30 +2715,6 @@ def main():
     subparser = subparsers.add_parser("fine-tune-confidence")
     subparser.set_defaults(callback=fine_tune_confidence)
     subparser.add_argument("--model-path-base", required=True)
-
-    subparser = subparsers.add_parser("parse")
-    subparser.set_defaults(callback=parse_sentences)
-    for arg in dynet_args:
-        subparser.add_argument(arg)
-    subparser.add_argument("--model-path-base", required=True)
-    subparser.add_argument("--file-path", required=True)
-
-    subparser.add_argument("--numpy-seed", type=int)
-    subparser.add_argument("--tag-embedding-dim", type=int, default=50)
-    subparser.add_argument("--word-embedding-dim", type=int, default=100)
-    subparser.add_argument("--lstm-layers", type=int, default=2)
-    subparser.add_argument("--lstm-dim", type=int, default=250)
-    subparser.add_argument("--label-hidden-dim", type=int, default=250)
-    subparser.add_argument("--split-hidden-dim", type=int, default=250)
-    subparser.add_argument("--dropout", type=float, default=0.4)
-    subparser.add_argument("--evalb-dir", default="EVALB/")
-    subparser.add_argument("--train-path", required=True)
-    subparser.add_argument("--dev-path", required=True)
-    subparser.add_argument("--epochs", type=int)
-    subparser.add_argument("--checks-per-epoch", type=int, default=4)
-    subparser.add_argument("--print-vocabs", action="store_true")
-    subparser.add_argument("--make-trees", action="store_true")
-    subparser.add_argument("--erase-labels", action="store_true")
 
     args = parser.parse_args()
     args.callback(args)
