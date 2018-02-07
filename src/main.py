@@ -868,23 +868,31 @@ def run_test_qbank(args):
     model = dy.ParameterCollection()
     [parser] = dy.load(args.model_path_base, model)
 
-    test_path = 'questionbank/qbank.{}.trees'.format(args.split)
-    test_treebank = trees.load_trees(test_path)
-    test_embeddings = []
-    if args.split == 'train':
-        indices = range(2000)
-    elif args.split == 'dev':
-        indices = range(2000, 3000)
-    else:
-        assert args.split == 'test', args.split
-        indices = range(3000, 4000)
+    treebank = trees.load_trees('questionbank/all_qb_trees.txt')
 
+    if args.stanford_split == 'true':
+        print('using stanford split')
+        split_to_indices = {
+            'train': list(range(0, 1000)) + list(range(2000, 3000)),
+            'dev': list(range(1000, 1500)) + list(range(3000, 3500)),
+            'test': list(range(1500, 2000)) + list(range(3500, 4000))
+        }
+    else:
+        print('not using stanford split')
+        split_to_indices = {
+            'train': range(0, 2000),
+            'dev': range(2000, 3000),
+            'test': range(3000, 4000)
+        }
+
+    indices = split_to_indices[args.split]
+    test_treebank = [treebank[index] for index in indices]
+    test_embeddings = []
     with h5py.File('question_bank_elmo_embeddings.hdf5', 'r') as h5f:
         for index in indices:
             test_embeddings.append(h5f[str(index)][:, :, :])
 
     test_embeddings_np = np.swapaxes(np.concatenate(test_embeddings, axis=1), axis1=0, axis2=1)
-
     dev_predicted = []
     cur_word_index = 0
     for dev_index, tree in enumerate(test_treebank):
@@ -2608,6 +2616,7 @@ def main():
     subparser.set_defaults(callback=run_test_qbank)
     for arg in dynet_args:
         subparser.add_argument(arg)
+    subparser.add_argument("--stanford-split", required=True)
     subparser.add_argument("--model-path-base", required=True)
     subparser.add_argument("--evalb-dir", default="EVALB/")
     subparser.add_argument("--split", required=True)
