@@ -860,6 +860,60 @@ def run_train(args):
 
 
 
+def evaluate_bro_co(args):
+    if not os.path.exists(args.expt_name):
+        os.mkdir(args.expt_name)
+
+    cleaned_corpus_path = trees.cleanup_text(args.input_file)
+    treebank = trees.load_trees(cleaned_corpus_path)
+    for tree in treebank:
+        print(tree.linearize())
+    sentences = [[(leaf.tag, leaf.word) for leaf in tree.leaves] for tree in treebank]
+    tokenized_lines = [' '.join([word for pos, word in sentence]) for sentence in sentences]
+    embeddings_np = compute_embeddings(tokenized_lines, args.expt_name)
+
+    model = dy.ParameterCollection()
+    [parser] = dy.load(args.model_path_base, model)
+
+    dev_predicted = []
+    cur_word_index = 0
+    for dev_index, tree in enumerate(treebank):
+        if dev_index % 100 == 0:
+            dy.renew_cg()
+            embeddings = dy.inputTensor(embeddings_np)
+        sentence = sentences[dev_index]
+        predicted, _ = parser.span_parser(sentence, is_train=False,
+                                          elmo_embeddings=embeddings,
+                                          cur_word_index=cur_word_index)
+        dev_predicted.append(predicted.convert())
+        cur_word_index += len(sentence)
+
+    dev_fscore_without_labels = evaluate.evalb(args.evalb_dir, treebank, dev_predicted,
+                                               args=args,
+                                               erase_labels=True,
+                                               name="without-labels")
+    print("dev-fscore without labels", dev_fscore_without_labels)
+
+    dev_fscore_without_labels = evaluate.evalb(args.evalb_dir, treebank, dev_predicted,
+                                               args=args,
+                                               erase_labels=True,
+                                               flatten=True,
+                                               name="without-label-flattened")
+    print("dev-fscore without labels and flattened", dev_fscore_without_labels)
+
+    dev_fscore_without_labels = evaluate.evalb(args.evalb_dir, treebank, dev_predicted,
+                                               args=args,
+                                               erase_labels=False,
+                                               flatten=True,
+                                               name="flattened")
+    print("dev-fscore with labels and flattened", dev_fscore_without_labels)
+
+    test_fscore = evaluate.evalb(args.evalb_dir, treebank, dev_predicted, args=args,
+                                 name="regular")
+
+    print("regular", test_fscore)
+
+
 def run_test_qbank(args):
     if not os.path.exists(args.expt_name):
         os.mkdir(args.expt_name)
@@ -940,51 +994,12 @@ def parse_file(args):
     model = dy.ParameterCollection()
     [parser] = dy.load(args.model_path_base, model)
 
+    print(parser.label_vocab.counts)
+
     with open(args.input_file, 'r') as f:
         lines = f.read().splitlines()
-    sentences_with_pos = []
-    nlp = spacy.load('en')
-    tokenized_lines = []
-    for line in lines:
-        sentence_with_pos = []
-        tokens = nlp(line)
-        tokenized_line = ""
-        for token in tokens:
-            tag = token.tag_
-            if tag == "-LRB-" or tag == "-RRB-":
-                tag = tag[1:-1]
-            elif tag == 'HYPH':
-                tag = ':'
-            if tag not in parser.tag_vocab.indices:
-                print(tag, token.text)
-            else:
-                word = token.text.replace('(', 'LRB').replace(')', 'RRB')
-                sentence_with_pos.append((tag, word))
-                tokenized_line += word + " "
 
-        sentences_with_pos.append(sentence_with_pos)
-        tokenized_lines.append(tokenized_line.strip())
-
-    tokenized_sentences_file_path = os.getcwd() + '/' + args.expt_name + '/tokenized_sentences.txt'
-    elmo_embeddings_file_path = os.getcwd() + '/' + args.expt_name + '/elmo.hd5'
-
-    with open(tokenized_sentences_file_path, 'w') as f:
-        f.write('\n'.join(tokenized_lines))
-
-    generate_elmo_vectors = '/home/vidurj/miniconda3/envs/allennlp/bin/python3 ' \
-                            '/home/vidurj/allennlp/scripts/write_elmo_representations_to_file.py ' \
-                            '--options_file "/home/vidurj/allennlp/scripts/elmo_options.json" --weight_file "/home/vidurj/allennlp/scripts/weights.hdf5" --input_file "{}" --output_file "{}"'.format(
-        tokenized_sentences_file_path, elmo_embeddings_file_path)
-    print(generate_elmo_vectors)
-    return_code = os.system(generate_elmo_vectors)
-    assert return_code == 0, return_code
-
-    elmo_embeddings_np = []
-    with h5py.File(elmo_embeddings_file_path, 'r') as h5f:
-        for index in range(len(tokenized_lines)):
-            elmo_embeddings_np.append(h5f[str(index)][:, :, :])
-
-    elmo_embeddings_np = np.swapaxes(np.concatenate(elmo_embeddings_np, axis=1), axis1=0, axis2=1)
+    sentences_with_pos, elmo_embeddings_np = compute_pos_and_embeddings(lines, args.expt_name, parser.tag_vocab)
 
     cur_word_index = 0
     output_string = ""
@@ -1001,7 +1016,8 @@ def parse_file(args):
                                                                                             elmo_embeddings,
                                                                                             cur_word_index)
             parses, scores = kbest((sentence_with_pos, int(args.num_parses), label_log_probabilities_np, span_to_index))
-            output_string += '\n' + tokenized_lines[index] + '\n\n'
+            sentence = [word for pos, word in sentence_with_pos]
+            output_string += '\n' + ' '.join(sentence) + '\n\n'
             for parse, score in zip(parses, scores):
                 output_string += str(math.exp(score)) + '\n' + parse.linearize() + '\n'
             output_string += '*' * 70 + '\n'
@@ -1009,6 +1025,195 @@ def parse_file(args):
     with open(args.expt_name + '/output.txt', 'w') as f:
         f.write(output_string)
 
+def compute_embeddings(tokenized_lines, expt_name):
+    tokenized_sentences_file_path = os.getcwd() + '/' + expt_name + '/tokenized_sentences.txt'
+    with open(tokenized_sentences_file_path, 'w') as f:
+        f.write('\n'.join(tokenized_lines))
+    elmo_embeddings_file_path = os.getcwd() + '/' + expt_name + '/elmo.hd5'
+    generate_elmo_vectors = '/home/vidurj/miniconda3/envs/allennlp/bin/python3 ' \
+                            '/home/vidurj/allennlp/scripts/write_elmo_representations_to_file.py ' \
+                            '--options_file "/home/vidurj/allennlp/scripts/elmo_options.json" --weight_file "/home/vidurj/allennlp/scripts/weights.hdf5" --input_file "{}" --output_file "{}"'.format(
+        tokenized_sentences_file_path, elmo_embeddings_file_path)
+    print(generate_elmo_vectors)
+    return_code = os.system(generate_elmo_vectors)
+    assert return_code == 0, return_code
+
+    elmo_embeddings_np = []
+    with h5py.File(elmo_embeddings_file_path, 'r') as h5f:
+        for index in range(len(h5f)):
+            elmo_embeddings_np.append(h5f[str(index)][:, :, :])
+
+    elmo_embeddings_np = np.swapaxes(np.concatenate(elmo_embeddings_np, axis=1), axis1=0, axis2=1)
+    return elmo_embeddings_np
+
+def compute_pos_and_embeddings(lines, expt_name, tag_vocab):
+    print(tag_vocab.counts)
+    sentences_with_pos = []
+    nlp = spacy.load('en')
+    tokenized_lines = []
+    for line in lines:
+        sentence_with_pos = []
+        tokens = nlp(line)
+        tokenized_line = ""
+        for token in tokens:
+            tag = token.tag_
+            if tag == "-LRB-" or tag == "-RRB-":
+                tag = tag[1:-1]
+            elif tag == 'HYPH':
+                tag = ':'
+            if tag not in tag_vocab.indices:
+                print(tag, token.text)
+                tag = 'CD'
+            word = token.text.replace('(', 'LRB').replace(')', 'RRB')
+            sentence_with_pos.append((tag, word))
+            tokenized_line += word + " "
+
+        sentences_with_pos.append(sentence_with_pos)
+        tokenized_lines.append(tokenized_line.strip())
+
+    elmo_embeddings_np = compute_embeddings(tokenized_lines, expt_name)
+    return sentences_with_pos, elmo_embeddings_np
+
+def train_on_brackets(args):
+    if not os.path.exists(args.expt_name):
+        os.mkdir(args.expt_name)
+
+    with open(args.input_file, 'r') as f:
+        lines = f.read().splitlines()
+
+    nlp = spacy.load('en')
+
+    processed_lines = []
+    sentence_number_to_bracketings = defaultdict(set)
+    for sentence_number, line in enumerate(lines):
+        tokens = [token.text for token in nlp(line)]
+        open_bracket_indices = []
+        sentence = []
+        print(line)
+        print('***')
+        constituent_spans = set()
+        for token in tokens:
+            if token == '[' or token == '{':
+                open_bracket_indices.append(len(sentence))
+            elif token == ']' or token == '}':
+                is_constituent = token == ']'
+                span = (open_bracket_indices.pop(), len(sentence))
+                temp = sentence + ["*" for _ in range(5)]
+                print(temp[span[0]: span[1]], is_constituent)
+                sentence_number_to_bracketings[sentence_number].add((span, is_constituent))
+                if is_constituent:
+                    constituent_spans.add(span)
+            else:
+                sentence.append(token)
+
+        for start in range(len(sentence)):
+            for end in range(start + 1, len(sentence) + 1):
+                span = (start, end)
+                for constituent_span in constituent_spans:
+                    if check_overlap(span, constituent_span):
+                        assert span not in constituent_spans
+                        sentence_number_to_bracketings[sentence_number].add((span, False))
+        print('-' * 40)
+        assert len(open_bracket_indices) == 0, open_bracket_indices
+        processed_lines.append(' '.join(sentence))
+    print(sentence_number_to_bracketings)
+
+    wsj_train = load_parses('data/train.trees')
+    parser, model = load_or_create_model(args, wsj_train)
+    trainer = dy.AdamTrainer(model)
+    sentences_with_pos, computed_embeddings_np = compute_pos_and_embeddings(processed_lines, args.expt_name, parser.tag_vocab)
+
+
+    wsj_indices = []
+
+    for epoch in itertools.count(start=1):
+        dy.renew_cg()
+        computed_embeddings = dy.inputTensor(computed_embeddings_np)
+
+        loss = dy.zeros(1)
+        cur_word_index = 0
+        num_correct = 0
+        num_wrong = 0
+        for sentence_number, sentence in enumerate(sentences_with_pos):
+            lstm_outputs = parser._featurize_sentence(sentence, is_train=True,
+                                                    elmo_embeddings=computed_embeddings,
+                                                    cur_word_index=cur_word_index)
+            cur_word_index += len(sentence)
+            encodings = []
+            span_to_index = {}
+            for ((start, end), is_constituent) in sentence_number_to_bracketings[sentence_number]:
+                span_to_index[(start, end)] = len(encodings)
+                encodings.append(parser._get_span_encoding(start, end, lstm_outputs))
+
+            label_scores = parser.f_label(dy.concatenate_to_batch(encodings))
+            label_scores_reshaped = dy.reshape(label_scores,
+                                               (parser.label_vocab.size, len(encodings)))
+            label_probabilities = dy.softmax(label_scores_reshaped)
+
+
+
+            for (span, is_constituent) in sentence_number_to_bracketings[sentence_number]:
+                span_index = span_to_index[span]
+                non_constituent_prob_np = label_probabilities[parser.empty_label_index][span_index].scalar_value()
+                if is_constituent:
+                    print(' '.join([word for pos, word in sentence[span[0]: span[1]]]))
+                    loss -= dy.log(1 - label_probabilities[parser.empty_label_index][span_index] + 10 ** -7)
+                else:
+                    loss -= dy.log(label_probabilities[parser.empty_label_index][span_index] + 10 ** -7)
+                if is_constituent and non_constituent_prob_np < 0.5:
+                    num_correct += 1
+                elif not is_constituent and non_constituent_prob_np > 0.5:
+                    num_correct += 1
+                else:
+                    num_wrong += 1
+
+
+        print(loss.scalar_value())
+        print('accuracy', num_correct / float(num_correct + num_wrong), num_correct, num_wrong)
+
+        batch_losses = [loss]
+        if not wsj_indices:
+            wsj_indices = list(range(398))
+            random.shuffle(wsj_indices)
+        wsj_batch_index = wsj_indices.pop()
+        h5f = h5py.File(
+            'ptb_elmo_embeddings/train/batch_{}_embeddings.h5'.format(wsj_batch_index), 'r')
+        wsj_train_embeddings = dy.inputTensor(h5f['embeddings'][:, :, :])
+        h5f.close()
+        wsj_cur_word_index = 0
+        for index in range(wsj_batch_index * 100, wsj_batch_index * 100 + 100):
+            tree = wsj_train[index]
+            sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
+            _, loss = parser.span_parser(sentence, is_train=True, gold=tree,
+                                         elmo_embeddings=wsj_train_embeddings,
+                                         cur_word_index=wsj_cur_word_index)
+            wsj_cur_word_index += len(sentence)
+            batch_losses.append(loss)
+
+
+        batch_loss = dy.average(batch_losses)
+        batch_loss_value = batch_loss.scalar_value()
+        batch_loss.backward()
+        trainer.update()
+        print(parser.elmo_weights.as_array())
+
+        print(batch_loss_value)
+        print('-' * 100)
+
+        if epoch % 10 == 0:
+            save_latest_model(args.model_path_base, parser)
+
+
+def save_latest_model(model_path_base, parser):
+    latest_model_path = "{}_latest_model".format(model_path_base)
+    for ext in [".data", ".meta"]:
+        path = latest_model_path + ext
+        if os.path.exists(path):
+            print("Removing previous model file {}...".format(path))
+            os.remove(path)
+
+    print("Saving new model to {}...".format(latest_model_path))
+    dy.save(latest_model_path, [parser])
 
 
 def run_train_question_bank_stanford_split(args):
@@ -2509,6 +2714,23 @@ def main():
 
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers()
+
+
+    subparser = subparsers.add_parser("parse-bro-co")
+    subparser.set_defaults(callback=evaluate_bro_co)
+    for arg in dynet_args:
+        subparser.add_argument(arg)
+    subparser.add_argument("--input-file", required=True)
+    subparser.add_argument("--model-path-base", required=True)
+    subparser.add_argument("--expt-name", required=True)
+
+    subparser = subparsers.add_parser("train-on-brackets")
+    subparser.set_defaults(callback=train_on_brackets)
+    for arg in dynet_args:
+        subparser.add_argument(arg)
+    subparser.add_argument("--input-file", required=True)
+    subparser.add_argument("--model-path-base", required=True)
+    subparser.add_argument("--expt-name", required=True)
 
     subparser = subparsers.add_parser("parse-file")
     subparser.set_defaults(callback=parse_file)

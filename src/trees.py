@@ -77,6 +77,7 @@ class LeafTreebankNode(TreebankNode):
 class ParseNode(object):
     pass
 
+
 def create_internal_parse_node(label, children):
     if len(children) == 0:
         return None
@@ -108,7 +109,6 @@ class InternalParseNode(ParseNode):
         self._delete_punctuation = None
         self._tree_bank = None
 
-
     def clean_up_punctuation(self):
         new_children = []
         for child in self.children:
@@ -117,12 +117,14 @@ class InternalParseNode(ParseNode):
             else:
                 child = child.clean_up_punctuation()
                 child_children = child.children
-                while len(child_children) > 0 and isinstance(child_children[0], LeafParseNode) and child_children[0].tag in deletable_tags:
+                while len(child_children) > 0 and isinstance(child_children[0], LeafParseNode) and \
+                                child_children[0].tag in deletable_tags:
                     new_children.append(child_children[0])
                     child_children = child_children[1:]
 
                 more_children = []
-                while len(child_children) > 0 and isinstance(child_children[-1], LeafParseNode) and child_children[-1].tag in deletable_tags:
+                while len(child_children) > 0 and isinstance(child_children[-1], LeafParseNode) and \
+                                child_children[-1].tag in deletable_tags:
                     more_children.append(child_children[-1])
                     child_children = child_children[:-1]
 
@@ -132,7 +134,8 @@ class InternalParseNode(ParseNode):
                     new_children.append(new_child)
                 new_children.extend(list(reversed(more_children)))
         new_node = create_internal_parse_node(self.label, new_children)
-        assert new_node.left == self.left and new_node.right == self.right, (new_node.left, self.left, new_node.right, self.right)
+        assert new_node.left == self.left and new_node.right == self.right, (
+        new_node.left, self.left, new_node.right, self.right)
         return new_node
 
     def delete_punctuation(self):
@@ -221,7 +224,34 @@ class LeafParseNode(ParseNode):
             return self
 
 
-def load_trees(path, strip_top=True):
+def cleanup_text(file_path):
+    with open(file_path, 'r') as f:
+        lines = f.read().splitlines()
+    processed_lines = []
+    num_open_parens = 0
+    for line in lines:
+        line = line.strip()
+        if len(line) == 0 or line[0] == '*':
+            continue
+        else:
+            if num_open_parens > 0:
+                processed_lines[-1] += line + ' '
+            else:
+                processed_lines.append(line)
+
+            num_parens_opened = line.count('(')
+            num_parens_closed = line.count(')')
+            num_open_parens += num_parens_opened - num_parens_closed
+    processed_file_path = file_path[:-4] + '_cleaned.txt'
+    output_string = ""
+    for processed_line in processed_lines:
+        output_string += processed_line.strip()[1:-1] + '\n'
+    with open(processed_file_path, 'w') as f:
+        f.write(output_string.strip())
+    return processed_file_path
+
+
+def load_trees(path, strip_top=True, filter_none=False):
     with open(path) as infile:
         tokens = infile.read().replace("(", " ( ").replace(")", " ) ").split()
 
@@ -239,11 +269,14 @@ def load_trees(path, strip_top=True):
 
             if tokens[index] == "(":
                 children, index = helper(index)
-                trees.append(InternalTreebankNode(label, children))
+                if not filter_none or (label != '-NONE-' and len(children) > 0):
+                    label = label.split('-')[0]
+                    trees.append(InternalTreebankNode(label, children))
             else:
                 word = tokens[index]
                 index += 1
-                trees.append(LeafTreebankNode(label, word))
+                if not filter_none or label != '-NONE-':
+                    trees.append(LeafTreebankNode(label, word))
 
             while paren_count > 0:
                 assert tokens[index] == ")"

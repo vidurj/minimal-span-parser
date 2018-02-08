@@ -20,6 +20,10 @@ class Vocabulary(object):
         if value == 'NUM' or value == "#":
             value = 'num'
 
+        if value == '-LRB-' or value == '-RRB-':
+            value = value[1:-1]
+
+
         if not self.frozen:
             self.counts[value] += 1
 
