@@ -202,20 +202,20 @@ class TopDownParser(object):
         self.label_vocab = label_vocab
         self.lstm_dim = lstm_dim
 
-        self.tag_embeddings = self.all_except_f_label.add_lookup_parameters(
-            (tag_vocab.size, tag_embedding_dim))
+        # self.tag_embeddings = self.all_except_f_label.add_lookup_parameters(
+        #     (tag_vocab.size, tag_embedding_dim))
         self.word_embeddings = self.all_except_f_label.add_lookup_parameters(
             (word_vocab.size, word_embedding_dim))
 
         self.lstm = dy.BiRNNBuilder(
             lstm_layers,
-            tag_embedding_dim + word_embedding_dim + 1024,
+            word_embedding_dim + 1024,
             2 * lstm_dim,
             self.all_except_f_label,
             dy.VanillaLSTMBuilder)
 
         self.f_label = Feedforward(
-            self.model, 2 * lstm_dim, [label_hidden_dim], label_vocab.size)
+            self.model, 2 * lstm_dim, [], label_vocab.size)
 
         self.dropout = dropout
         self.empty_label = ()
@@ -235,18 +235,17 @@ class TopDownParser(object):
             self.lstm.disable_dropout()
         embeddings = []
         for tag, word in [(START, START)] + sentence + [(STOP, STOP)]:
-            tag_embedding = self.tag_embeddings[self.tag_vocab.index(tag)]
             if word not in (START, STOP):
                 count = self.word_vocab.count(word)
                 if not count or (is_train and (np.random.rand() < 1 / (1 + count) or np.random.rand() < 0.1)):
                     word = UNK
             word_embedding = self.word_embeddings[self.word_vocab.index(word)]
             if tag == START or tag == STOP:
-                concatenated_embeddings = [tag_embedding, word_embedding, dy.zeros(1024)]
+                concatenated_embeddings = [word_embedding, dy.zeros(1024)]
             else:
                 elmo_weights = dy.parameter(self.elmo_weights)
                 embedding = dy.sum_dim(dy.cmult(elmo_weights, elmo_embeddings[cur_word_index]), [0])
-                concatenated_embeddings = [tag_embedding, word_embedding, embedding]
+                concatenated_embeddings = [word_embedding, embedding]
                 cur_word_index += 1
             embeddings.append(dy.concatenate(concatenated_embeddings))
         return self.lstm.transduce(embeddings)
