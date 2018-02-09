@@ -217,6 +217,9 @@ class TopDownParser(object):
         self.f_label = Feedforward(
             self.model, 2 * lstm_dim, [label_hidden_dim], label_vocab.size)
 
+        self.f_tag = Feedforward(
+            self.model, 2 * lstm_dim, [], tag_vocab.size)
+
         self.dropout = dropout
         self.empty_label = ()
         self.empty_label_index = self.label_vocab.index(self.empty_label)
@@ -276,6 +279,12 @@ class TopDownParser(object):
         lstm_outputs = self._featurize_sentence(sentence, is_train=True, elmo_embeddings=elmo_vecs,
                                                 cur_word_index=cur_word_index)
 
+        tag_log_probabilities = dy.log_softmax(dy.transpose(self.f_tag(lstm_outputs[1:-1])))
+        total_loss = dy.zeros(1)
+        for word_index, (tag, _) in enumerate(sentence):
+            tag_index = self.tag_vocab.index(tag)
+            total_loss -= tag_log_probabilities[tag_index][word_index]
+
         encodings = []
         for annotation in annotations:
             assert 0 <= annotation.left < annotation.right <= len(sentence), \
@@ -284,10 +293,9 @@ class TopDownParser(object):
             encodings.append(encoding)
 
         label_log_probabilities = self._encodings_to_label_log_probabilities(encodings)
-        total_loss = dy.zeros(1)
+
         for index, annotation in reversed(list(enumerate(annotations))):
-            loss = - label_log_probabilities[annotation.oracle_label_index][index]
-            total_loss = total_loss + loss
+            total_loss -= label_log_probabilities[annotation.oracle_label_index][index]
         return total_loss
 
 
