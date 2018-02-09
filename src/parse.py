@@ -215,7 +215,7 @@ class TopDownParser(object):
             dy.VanillaLSTMBuilder)
 
         self.f_label = Feedforward(
-            self.model, 2 * lstm_dim, [], label_vocab.size)
+            self.model, 2 * lstm_dim, [label_hidden_dim], label_vocab.size)
 
         self.dropout = dropout
         self.empty_label = ()
