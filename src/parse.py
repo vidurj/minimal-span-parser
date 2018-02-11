@@ -198,6 +198,7 @@ class TopDownParser(object):
         self.elmo_weights = self.all_except_f_label.parameters_from_numpy(
             np.array([0.16397782, 0.67511874, 0.02329052]), name='elmo-averaging-weights')
         self.tag_vocab = tag_vocab
+        print('tag vocab', tag_vocab.size)
         self.word_vocab = word_vocab
         self.label_vocab = label_vocab
         self.lstm_dim = lstm_dim
@@ -279,8 +280,11 @@ class TopDownParser(object):
         lstm_outputs = self._featurize_sentence(sentence, is_train=True, elmo_embeddings=elmo_vecs,
                                                 cur_word_index=cur_word_index)
 
-        tag_log_probabilities = dy.log_softmax(dy.transpose(self.f_tag(lstm_outputs[1:-1])))
+        outputs_as_batch = dy.concatenate_to_batch(lstm_outputs[1:-1])
+        tag_log_probabilities = dy.reshape(dy.log_softmax(self.f_tag(outputs_as_batch)), (self.tag_vocab.size, len(lstm_outputs) - 2))
+        # print('dim', tag_log_probabilities.dim())
         total_loss = dy.zeros(1)
+
         for word_index, (tag, _) in enumerate(sentence):
             tag_index = self.tag_vocab.index(tag)
             total_loss -= tag_log_probabilities[tag_index][word_index]

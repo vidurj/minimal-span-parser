@@ -400,7 +400,7 @@ def load_or_create_model(args, parses_for_vocab):
         )
         print('populating params from 40k_elmo.model')
         # parser.f_label.param_collection().populate('40k_elmo.model', '/ffn')
-        parser.word_embeddings.populate('40k_elmo.model', '/word-embeddings')
+        # parser.word_embeddings.populate('40k_elmo.model', '/word-embeddings')
     return parser, model
 
 
