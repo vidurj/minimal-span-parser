@@ -400,7 +400,11 @@ def load_or_create_model(args, parses_for_vocab):
         )
         print('populating params from 40k_elmo.model')
         # parser.f_label.param_collection().populate('40k_elmo.model', '/ffn')
-        # parser.word_embeddings.populate('40k_elmo.model', '/word-embeddings')
+        parser.word_embeddings.populate('predict-pos.model', '/word-embeddings')
+        parser.lstm.param_collection().populate('predict-pos.model', '/lstm')
+        # parser.elmo_weights.populate('predict-pos.model', '/elmo-weights')
+        # parser.f_encoding.weights[0].populate('predict-pos.model', '/encoding-weights')
+        # parser.f_encoding.biases[0].populate('predict-pos.model', '/encoding-biases')
     return parser, model
 
 

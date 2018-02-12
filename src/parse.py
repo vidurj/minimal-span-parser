@@ -196,12 +196,13 @@ class TopDownParser(object):
         self.model = model.add_subcollection("Parser")
         self.all_except_f_label = self.model.add_subcollection("allExceptFLabel")
         self.elmo_weights = self.all_except_f_label.parameters_from_numpy(
-            np.array([0.16397782, 0.67511874, 0.02329052]), name='elmo-averaging-weights')
+            np.array([0.19608361,  0.53294581, -0.00724584]), name='elmo-averaging-weights')
         self.tag_vocab = tag_vocab
         print('tag vocab', tag_vocab.size)
         self.word_vocab = word_vocab
         self.label_vocab = label_vocab
         self.lstm_dim = lstm_dim
+        self.hidden_dim = label_hidden_dim
 
         # self.tag_embeddings = self.all_except_f_label.add_lookup_parameters(
         #     (tag_vocab.size, tag_embedding_dim))
@@ -215,11 +216,14 @@ class TopDownParser(object):
             self.all_except_f_label,
             dy.VanillaLSTMBuilder)
 
+        self.f_encoding = Feedforward(
+            self.model, 2 * lstm_dim, [], label_hidden_dim)
+
         self.f_label = Feedforward(
-            self.model, 2 * lstm_dim, [label_hidden_dim], label_vocab.size)
+            self.model, label_hidden_dim, [], label_vocab.size)
 
         self.f_tag = Feedforward(
-            self.model, 2 * lstm_dim, [], tag_vocab.size)
+            self.model, label_hidden_dim, [], tag_vocab.size)
 
         self.dropout = dropout
         self.empty_label = ()
@@ -280,25 +284,43 @@ class TopDownParser(object):
         lstm_outputs = self._featurize_sentence(sentence, is_train=True, elmo_embeddings=elmo_vecs,
                                                 cur_word_index=cur_word_index)
 
-        outputs_as_batch = dy.concatenate_to_batch(lstm_outputs[1:-1])
-        tag_log_probabilities = dy.reshape(dy.log_softmax(self.f_tag(outputs_as_batch)), (self.tag_vocab.size, len(lstm_outputs) - 2))
-        # print('dim', tag_log_probabilities.dim())
-        total_loss = dy.zeros(1)
-
-        for word_index, (tag, _) in enumerate(sentence):
-            tag_index = self.tag_vocab.index(tag)
-            total_loss -= tag_log_probabilities[tag_index][word_index]
-
-        encodings = []
+        other_encodings = []
+        single_word_encodings = []
+        span_to_index = {}
         for annotation in annotations:
             assert 0 <= annotation.left < annotation.right <= len(sentence), \
                 (0, annotation.left, annotation.right, len(sentence))
             encoding = self._get_span_encoding(annotation.left, annotation.right, lstm_outputs)
-            encodings.append(encoding)
+            span = (annotation.left, annotation.right)
 
-        label_log_probabilities = self._encodings_to_label_log_probabilities(encodings)
+            if annotation.right - annotation.left > 1:
+                span_to_index[span] = len(other_encodings)
+                other_encodings.append(encoding)
+            else:
+                span_to_index[span] = len(single_word_encodings)
+                single_word_encodings.append(encoding)
 
-        for index, annotation in reversed(list(enumerate(annotations))):
+        encodings = single_word_encodings + other_encodings
+        span_encodings = dy.reshape(self.f_encoding(dy.concatenate_to_batch(encodings)),
+                                    (self.hidden_dim, len(encodings)))
+        label_scores = self.f_label(span_encodings)
+        label_scores_reshaped = dy.reshape(label_scores, (self.label_vocab.size, len(encodings)))
+        label_log_probabilities = dy.log_softmax(label_scores_reshaped)
+        single_word_span_encodings = dy.select_cols(span_encodings,
+                                                    list(range(len(single_word_encodings))))
+        tag_scores = self.f_tag(single_word_span_encodings)
+        tag_scores_reshaped = dy.reshape(tag_scores, (self.tag_vocab.size, len(single_word_encodings)))
+        tag_log_probabilities = dy.log_softmax(tag_scores_reshaped)
+
+        total_loss = dy.zeros(1)
+        for annotation in annotations:
+            span = (annotation.left, annotation.right)
+            if annotation.right - annotation.left == 1:
+                index = span_to_index[span]
+                oracle_tag = sentence[annotation.left][0]
+                total_loss -= tag_log_probabilities[self.tag_vocab.index(oracle_tag)][index]
+            else:
+                index = span_to_index[span] + len(single_word_encodings)
             total_loss -= label_log_probabilities[annotation.oracle_label_index][index]
         return total_loss
 
