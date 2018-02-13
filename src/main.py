@@ -467,7 +467,6 @@ def print_dev_perf_by_entropy(dev_parses, matrices, span_to_entropy, parser, exp
 
 
 def run_training_on_spans(args):
-    assert args.batch_size == 100, args.batch_size
     return_code = os.system('cp -r src {}/'.format(args.expt_name))
     assert return_code == 0
     if args.numpy_seed is not None:
@@ -527,6 +526,8 @@ def run_training_on_spans(args):
 
     dev_parses = [x.convert() for x in dev_treebank]
 
+    dev_sentence_embeddings = h5py.File('../wsj-dev.hdf5', 'r')
+
     def check_dev():
         nonlocal best_dev_fscore
         nonlocal best_dev_model_path
@@ -537,19 +538,14 @@ def run_training_on_spans(args):
         # total_loglikelihood = 0
         matrices = []
         fill_span_to_entropy = len(span_to_entropy) == 0
+        num_correct = 0
+        total = 0
         for sentence_number, tree in enumerate(dev_treebank):
-            if sentence_number % 100 == 0:
-                dy.renew_cg()
-                cur_word_index = 0
-                batch_number = int(sentence_number / 100)
-                h5f = h5py.File('ptb_elmo_embeddings/dev/batch_{}_embeddings.h5'.format(batch_number), 'r')
-                embedding_array = h5f['embeddings'][:, :, :]
-                elmo_embeddings = dy.inputTensor(embedding_array)
-                h5f.close()
-
             sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-            predicted, _ = parser.span_parser(sentence, is_train=False, elmo_embeddings=elmo_embeddings, cur_word_index=cur_word_index)
-            cur_word_index += len(sentence)
+            elmo_embeddings = dy.inputTensor(dev_sentence_embeddings[str(sentence_number)][:, :, :])
+            predicted, (_, c, t) = parser.span_parser(sentence, is_train=False, elmo_embeddings=elmo_embeddings)
+            num_correct += c
+            total += t
 
             # total_loglikelihood += log_likelihood
             dev_predicted.append(predicted.convert())
@@ -563,7 +559,7 @@ def run_training_on_spans(args):
             #             span_to_entropy[(sentence_number, start, end)] = entropy
             #     assert cur_index == label_probabilities.shape[1] - 1, (cur_index, label_probabilities.shape)
 
-
+        print('pos accuracy', num_correct / float(total))
         # print_dev_perf_by_entropy(dev_parses, matrices, span_to_entropy, parser, args.expt_name)
 
         if args.erase_labels:
@@ -626,18 +622,19 @@ def run_training_on_spans(args):
             seen.add((span, sentence_number))
     return_code = os.system('echo "test"')
     assert return_code == 0
-    batch_numbers = list(range(398))
     num_trees = len(all_sentence_number_to_annotations)
     print('num trees', num_trees)
+    train_sentence_embeddings = h5py.File('../wsj-train.hdf5', 'r')
     for epoch in itertools.count(start=1):
         if args.epochs is not None and epoch > args.epochs:
             break
 
-        if epoch > 1:
-            is_best, dev_score = check_dev()
-        else:
-            is_best = True
-            dev_score = None
+        # if epoch > 1:
+        # save_latest_model(args.model_path_base, parser)
+        is_best, dev_score = check_dev()
+        # else:
+        #     is_best = True
+        #     dev_score = None
 
         if dev_score is not None:
             perf_summary = '\n' + '-' * 40 + '\n' + str(dev_score) + '\n'
@@ -652,87 +649,59 @@ def run_training_on_spans(args):
                 assert return_code == 0
 
         print("Total batch loss", total_batch_loss, "Prev batch loss", prev_total_batch_loss)
-        if args.annotation_type != "none" and not is_best:
-            print("Adding more training data")
-            pick_spans_for_annotations(parser,
-                                       active_learning_sentences_and_spans,
-                                       args.expt_name,
-                                       os.path.join(args.expt_name, "span_labels.txt"),
-                                       seen=seen,
-                                       num_low_conf=args.num_low_conf,
-                                       low_conf_cutoff=float(args.low_conf_cutoff))
-            annotated_sentence_number_to_annotations = load_training_spans(args, parser, active_learning_sentences_and_spans)
-            train_sentence_number_to_annotations.update(annotated_sentence_number_to_annotations)
-            all_sentence_number_to_annotations = train_sentence_number_to_annotations
-            for sentence_number, annotations in annotated_sentence_number_to_annotations.items():
-                for label in annotations:
-                    span = (label.left, label.right)
-                    seen.add((span, sentence_number))
-            prev_total_batch_loss = None
-        else:
-            prev_total_batch_loss = total_batch_loss
-        for _ in range(1):
-            np.random.shuffle(batch_numbers)
-            epoch_start_time = time.time()
-            annotation_index = 0
-            num_batches = 0
-            total_batch_loss = 0
-            for batch_number in batch_numbers:
-                dy.renew_cg()
-                batch_losses = []
-                elmo_embeddings = None
-                cur_word_index = 0
+        prev_total_batch_loss = total_batch_loss
+        sentence_indices = list(range(len(all_parses)))
+        np.random.shuffle(sentence_indices)
+        epoch_start_time = time.time()
+        num_batches = 0
+        total_batch_loss = 0
+        while len(sentence_indices) >= args.batch_size:
+            dy.renew_cg()
+            batch_losses = []
 
-                for offset in range(args.batch_size):
-                    sentence_number = batch_number * 100 + offset
-                    tree = all_parses[sentence_number]
-                    if sentence_number not in all_sentence_number_to_annotations:
-                        cur_word_index += len(tree.leaves)
-                        continue
-                    elif elmo_embeddings is None:
-                        h5f = h5py.File('ptb_elmo_embeddings/train/batch_{}_embeddings.h5'.format(
-                            batch_number), 'r')
-                        elmo_embeddings = dy.inputTensor(h5f['embeddings'][:, :, :])
-                        h5f.close()
+            for _ in range(args.batch_size):
+                sentence_number = sentence_indices.pop()
+                tree = all_parses[sentence_number]
+                if sentence_number not in all_sentence_number_to_annotations:
+                    print('skipping sentence number', sentence_number)
+                    continue
 
-                    sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-                    annotation_index += 1
-                    loss = parser.train_on_partial_annotation(
-                            sentence,
-                            all_sentence_number_to_annotations[sentence_number],
-                            elmo_vecs=elmo_embeddings,
-                            cur_word_index=cur_word_index
+                sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
+                elmo_embeddings_np = train_sentence_embeddings[str(sentence_number)][:, :, :]
+                assert elmo_embeddings_np.shape[1] == len(sentence), (len(sentence), elmo_embeddings_np.shape)
+                elmo_embeddings = dy.inputTensor(elmo_embeddings_np)
+                loss = parser.train_on_partial_annotation(sentence,
+                                                          all_sentence_number_to_annotations[sentence_number],
+                                                          elmo_embeddings)
+                batch_losses.append(loss)
+                total_processed += 1
+                current_processed += 1
+
+            if len(batch_losses) > 0:
+                print("elmo weights", parser.elmo_weights.as_array())
+                batch_loss = dy.average(batch_losses)
+                batch_loss.backward()
+                trainer.update()
+                batch_loss_value = batch_loss.scalar_value()
+                total_batch_loss += batch_loss_value
+                num_batches += 1
+
+                print(
+                    "epoch {:,} "
+                    "batch {:,}/{:,} "
+                    "processed {:,} "
+                    "batch-loss {:.4f} "
+                    "epoch-elapsed {} "
+                    "total-elapsed {}".format(
+                        epoch,
+                        num_batches,
+                        len(all_parses) / args.batch_size,
+                        total_processed,
+                        batch_loss_value,
+                        format_elapsed(epoch_start_time),
+                        format_elapsed(start_time),
                     )
-                    batch_losses.append(loss)
-                    total_processed += 1
-                    current_processed += 1
-                    cur_word_index += len(tree.leaves)
-
-                if len(batch_losses) > 0:
-                    print("elmo weights", parser.elmo_weights.as_array())
-                    batch_loss = dy.average(batch_losses)
-                    batch_loss.backward()
-                    trainer.update()
-                    batch_loss_value = batch_loss.scalar_value()
-                    total_batch_loss += batch_loss_value
-                    num_batches += 1
-
-                    print(
-                        "epoch {:,} "
-                        "batch {:,}/{:,} "
-                        "processed {:,} "
-                        "batch-loss {:.4f} "
-                        "epoch-elapsed {} "
-                        "total-elapsed {}".format(
-                            epoch,
-                            num_batches,
-                            len(batch_numbers),
-                            total_processed,
-                            batch_loss_value,
-                            format_elapsed(epoch_start_time),
-                            format_elapsed(start_time),
-                        )
-                    )
+                )
 
 
 def run_train(args):
