@@ -541,8 +541,12 @@ def run_training_on_spans(args):
         num_correct = 0
         total = 0
         for sentence_number, tree in enumerate(dev_treebank):
+            if sentence_number % 100 == 0:
+                dy.renew_cg()
             sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-            elmo_embeddings = dy.inputTensor(dev_sentence_embeddings[str(sentence_number)][:, :, :])
+            elmo_embeddings_np = dev_sentence_embeddings[str(sentence_number)][:, :, :]
+            assert elmo_embeddings_np.shape[1] == len(sentence)
+            elmo_embeddings = dy.inputTensor(elmo_embeddings_np)
             predicted, (_, c, t) = parser.span_parser(sentence, is_train=False, elmo_embeddings=elmo_embeddings)
             num_correct += c
             total += t
@@ -2102,11 +2106,15 @@ def run_test(args):
     assert file_name.endswith('.trees'), args.test_path
     file_name = file_name[:-6]
     assert file_name == 'test' or file_name == 'dev' or file_name == 'train', args.test_path
+    if file_name == 'test':
+        sentence_embeddings = h5py.File('../wsj-test.hdf5', 'r')
+    elif file_name == 'dev':
+        sentence_embeddings = h5py.File('../wsj-dev.hdf5', 'r')
+    else:
+        assert file_name == 'train', file_name
+        sentence_embeddings = h5py.File('../wsj-train.hdf5', 'r')
+
     test_treebank = trees.load_trees(args.test_path)
-    num_excess_trees = len(test_treebank) % 100
-    if num_excess_trees != 0:
-        print('last {} parses are skipped by current elmo vecs'.format(num_excess_trees))
-        test_treebank = test_treebank[:-num_excess_trees]
 
     test_parse = [tree.convert() for tree in test_treebank]
     print("Loaded {:,} test examples.".format(len(test_treebank)))
@@ -2124,20 +2132,18 @@ def run_test(args):
     total_turned_off = 0
     ranks = []
     print('elmo weights', parser.elmo_weights.as_array())
+    num_correct = 0
+    total = 0
     for tree_index, tree in enumerate(test_parse):
         if tree_index % 100 == 0:
             dy.renew_cg()
-            cur_word_index = 0
-            batch_number = int(tree_index / 100)
-            embedding_file_name = 'ptb_elmo_embeddings/{}/batch_{}_embeddings.h5'.format(file_name, batch_number)
-            h5f = h5py.File(embedding_file_name, 'r')
-            embedding_array = h5f['embeddings'][:, :, :]
-            elmo_embeddings = dy.inputTensor(embedding_array)
-            h5f.close()
-            print(tree_index)
         sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-        predicted, additional_info = parser.span_parser(sentence, is_train=False, elmo_embeddings=elmo_embeddings, cur_word_index=cur_word_index, gold=tree)
-        cur_word_index += len(sentence)
+        elmo_embeddings_np = sentence_embeddings[str(tree_index)][:, :, :]
+        assert elmo_embeddings_np.shape[1] == len(sentence), (elmo_embeddings_np.shape[1], len(sentence))
+        elmo_embeddings = dy.inputTensor(elmo_embeddings_np)
+        predicted, (additional_info, c, t) = parser.span_parser(sentence, is_train=False, elmo_embeddings=elmo_embeddings, gold=tree)
+        num_correct += c
+        total += t
         rank = additional_info[3]
         ranks.append(rank)
         total_log_likelihood += additional_info[-1]
@@ -2148,6 +2154,7 @@ def run_test(args):
         #         total_confusion_matrix[k] += v
         #     else:
         #         total_confusion_matrix[k] = v
+    print('pos accuracy', num_correct / total)
     print("total time", time.time() - start_time)
     print("total loglikelihood", total_log_likelihood)
     print("total turned off", total_turned_off)

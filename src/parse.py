@@ -513,8 +513,8 @@ class TopDownParser(object):
                     single_word_encodings.append(encoding)
 
         encodings = single_word_encodings + other_encodings
-        span_encodings = dy.reshape(self.f_encoding(dy.concatenate_to_batch(encodings)),
-                                    (self.hidden_dim, len(encodings)))
+        span_encodings = dy.rectify(dy.reshape(self.f_encoding(dy.concatenate_to_batch(encodings)),
+                                    (self.hidden_dim, len(encodings))))
         label_scores = self.f_label(span_encodings)
         label_scores_reshaped = dy.reshape(label_scores, (self.label_vocab.size, len(encodings)))
         label_log_probabilities = dy.log_softmax(label_scores_reshaped)
