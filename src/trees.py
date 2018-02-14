@@ -290,7 +290,7 @@ def load_trees(path, strip_top=True, filter_none=False):
 
     if strip_top:
         for i, tree in enumerate(trees):
-            if tree.label == "TOP":
+            if isinstance(tree, InternalTreebankNode) and tree.label == "TOP":
                 assert len(tree.children) == 1
                 trees[i] = tree.children[0]
 

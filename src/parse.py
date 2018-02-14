@@ -17,6 +17,7 @@ from main import check_overlap
 START = "<START>"
 STOP = "<STOP>"
 UNK = "<UNK>"
+deletable_tags = {',', ':', '``', "''", '.'}
 
 
 def resolve_conflicts_optimaly(chosen_spans):
@@ -124,7 +125,7 @@ def optimal_parser(label_log_probabilities_np,
                 gold_parse_log_likelihood += oracle_label_log_probability
                 confusion_matrix[(label, oracle_label)] += 1
 
-        choices, _ = resolve_conflicts_greedily(greedily_chosen_spans)
+        choices, _ = resolve_conflicts_optimaly(greedily_chosen_spans)
         span_to_label = {}
         predicted_parse_log_likelihood = np.sum(label_log_probabilities_np[empty_label_index, :])
         adjusted = label_log_probabilities_np - label_log_probabilities_np[empty_label_index, :]
@@ -187,43 +188,61 @@ class TopDownParser(object):
             lstm_dim,
             label_hidden_dim,
             split_hidden_dim,
-            dropout
+            dropout,
+            use_elmo=True,
+            predict_pos=True
     ):
+        use_elmo = True
+        predict_pos = True
         self.spec = locals()
         self.spec.pop("self")
         self.spec.pop("model")
 
         self.model = model.add_subcollection("Parser")
         self.mlp = self.model.add_subcollection("mlp")
-        self.elmo_weights = self.model.parameters_from_numpy(
-            np.array([0.19608361,  0.53294581, -0.00724584]), name='elmo-averaging-weights')
+
         self.tag_vocab = tag_vocab
         print('tag vocab', tag_vocab.size)
         self.word_vocab = word_vocab
         self.label_vocab = label_vocab
         self.lstm_dim = lstm_dim
         self.hidden_dim = label_hidden_dim
+        self.predict_pos = predict_pos
 
-        # self.tag_embeddings = self.all_except_f_label.add_lookup_parameters(
-        #     (tag_vocab.size, tag_embedding_dim))
-        self.word_embeddings = self.model.add_lookup_parameters(
-            (word_vocab.size, word_embedding_dim))
+        lstm_input_dim = word_embedding_dim
+        if use_elmo:
+            self.elmo_weights = self.model.parameters_from_numpy(
+                np.array([0.19608361, 0.53294581, -0.00724584]), name='elmo-averaging-weights')
+            lstm_input_dim += 1024
+        if not predict_pos:
+            lstm_input_dim += tag_embedding_dim
 
         self.lstm = dy.BiRNNBuilder(
             lstm_layers,
-            word_embedding_dim + 1024,
+            lstm_input_dim,
             2 * lstm_dim,
             self.model,
             dy.VanillaLSTMBuilder)
 
-        self.f_encoding = Feedforward(
-            self.mlp, 2 * lstm_dim, [], label_hidden_dim)
 
-        self.f_label = Feedforward(
-            self.mlp, label_hidden_dim, [], label_vocab.size)
 
-        self.f_tag = Feedforward(
-            self.mlp, label_hidden_dim, [], tag_vocab.size)
+        if not predict_pos:
+            self.tag_embeddings = self.model.add_lookup_parameters((tag_vocab.size, tag_embedding_dim))
+            self.f_label = Feedforward(self.mlp, 2 * lstm_dim, [label_hidden_dim], label_vocab.size)
+        else:
+            self.f_encoding = Feedforward(
+                self.mlp, 2 * lstm_dim, [], label_hidden_dim)
+
+            self.f_label = Feedforward(
+                self.mlp, label_hidden_dim, [], label_vocab.size)
+
+            self.f_tag = Feedforward(
+                self.mlp, label_hidden_dim, [], tag_vocab.size)
+
+        self.word_embeddings = self.model.add_lookup_parameters(
+            (word_vocab.size, word_embedding_dim))
+
+        self.use_elmo = use_elmo
 
         self.dropout = dropout
         self.empty_label = ()
@@ -249,14 +268,21 @@ class TopDownParser(object):
                 if not count or (is_train and (np.random.rand() < 1 / (1 + count) or np.random.rand() < 0.1)):
                     word = UNK
             word_embedding = self.word_embeddings[self.word_vocab.index(word)]
-            if tag == START or tag == STOP:
-                concatenated_embeddings = [word_embedding, dy.zeros(1024)]
-            else:
-                elmo_weights = dy.parameter(self.elmo_weights)
-                embedding = dy.sum_dim(dy.cmult(elmo_weights, dy.pick(elmo_embeddings, index=cur_word_index, dim=1)), [0])
-                concatenated_embeddings = [word_embedding, embedding]
-                cur_word_index += 1
-            embeddings.append(dy.concatenate(concatenated_embeddings))
+            input_components = [word_embedding]
+            if self.use_elmo:
+                if tag == START or tag == STOP:
+                    elmo_embedding = dy.zeros(1024)
+                else:
+                    elmo_weights = dy.parameter(self.elmo_weights)
+                    elmo_embedding = dy.sum_dim(dy.cmult(elmo_weights, dy.pick(elmo_embeddings,
+                                                                               index=cur_word_index,
+                                                                               dim=1)), [0])
+                    cur_word_index += 1
+                input_components.append(elmo_embedding)
+            if not self.predict_pos:
+                tag_embedding = self.tag_embeddings[self.tag_vocab.index(tag)]
+                input_components.append(tag_embedding)
+            embeddings.append(dy.concatenate(input_components))
         return self.lstm.transduce(embeddings)
 
     def _get_span_encoding(self, left, right, lstm_outputs):
@@ -278,52 +304,6 @@ class TopDownParser(object):
         # 990.51641846]] [ 0.03124614  4.00097179 -9.43100834
         # label_scores_reshaped = dy.logistic(label_scores_reshaped * 0.03124614 + 4.00097179) * 990.51641846 - 9.43100834
         return dy.log_softmax(label_scores_reshaped)
-
-    def train_on_partial_annotation(self, sentence, annotations, elmo_vecs):
-        if len(annotations) == 0:
-            return dy.zeros(1)
-        lstm_outputs = self._featurize_sentence(sentence, is_train=True, elmo_embeddings=elmo_vecs)
-
-        other_encodings = []
-        single_word_encodings = []
-        span_to_index = {}
-        for annotation in annotations:
-            assert 0 <= annotation.left < annotation.right <= len(sentence), \
-                (0, annotation.left, annotation.right, len(sentence))
-            encoding = self._get_span_encoding(annotation.left, annotation.right, lstm_outputs)
-            span = (annotation.left, annotation.right)
-
-            if annotation.right - annotation.left == 1:
-                span_to_index[span] = len(single_word_encodings)
-                single_word_encodings.append(encoding)
-            else:
-                span_to_index[span] = len(other_encodings)
-                other_encodings.append(encoding)
-
-        encodings = single_word_encodings + other_encodings
-        span_encodings = dy.rectify(dy.reshape(self.f_encoding(dy.concatenate_to_batch(encodings)),
-                                    (self.hidden_dim, len(encodings))))
-        label_scores = self.f_label(span_encodings)
-        label_scores_reshaped = dy.reshape(label_scores, (self.label_vocab.size, len(encodings)))
-        label_log_probabilities = dy.log_softmax(label_scores_reshaped)
-        single_word_span_encodings = dy.select_cols(span_encodings,
-                                                    list(range(len(single_word_encodings))))
-        tag_scores = self.f_tag(single_word_span_encodings)
-        tag_scores_reshaped = dy.reshape(tag_scores,
-                                         (self.tag_vocab.size, len(single_word_encodings)))
-        tag_log_probabilities = dy.log_softmax(tag_scores_reshaped)
-
-        total_loss = dy.zeros(1)
-        for annotation in annotations:
-            span = (annotation.left, annotation.right)
-            if annotation.right - annotation.left == 1:
-                index = span_to_index[span]
-                oracle_tag = sentence[annotation.left][0]
-                total_loss -= tag_log_probabilities[self.tag_vocab.index(oracle_tag)][index]
-            else:
-                index = span_to_index[span] + len(single_word_encodings)
-            total_loss -= label_log_probabilities[annotation.oracle_label_index][index]
-        return total_loss
 
 
     def get_distribution_for_kbest(self, sentence, elmo_embeddings, cur_word_index):
@@ -370,114 +350,6 @@ class TopDownParser(object):
             span_to_labels[span] = labels
         return span_to_labels, forest_prob_mass
 
-    def return_spans_and_uncertainties(self,
-                                       sentence,
-                                       sentence_number,
-                                       gold,
-                                       use_oracle,
-                                       low_conf_cutoff,
-                                       pseudo_label_cutoff,
-                                       seen):
-        spans = [span for span in get_all_spans(gold).keys() if
-                 (span, sentence_number) not in seen]
-        if len(spans) == 0:
-            return []
-        lstm_outputs = self._featurize_sentence(sentence, is_train=False)
-        encodings = []
-        for (start, end) in spans:
-            encodings.append(self._get_span_encoding(start, end, lstm_outputs))
-        label_scores = self.f_label(dy.concatenate_to_batch(encodings))
-        label_scores_reshaped = dy.reshape(label_scores,
-                                           (self.label_vocab.size, len(encodings)))
-        label_probabilities_np = dy.softmax(label_scores_reshaped).npvalue()
-        low_confidence_labels = []
-        high_confidence_labels = []
-        for index, (start, end) in enumerate(spans):
-            distribution = label_probabilities_np[:, index]
-            entropy = stats.entropy(distribution)
-            oracle_label = gold.oracle_label(start, end)
-            predicted_label_index = distribution.argmax()
-            predicted_label = self.label_vocab.value(predicted_label_index)
-            annotation_request = dict(
-                sentence_number=sentence_number,
-                left=start,
-                right=end,
-                entropy=entropy,
-                non_constituent_probability=distribution[0]
-            )
-            if use_oracle:
-                oracle_label_index = self.label_vocab.index(oracle_label)
-                if oracle_label_index != predicted_label_index and distribution[
-                    oracle_label_index] > 0.01:
-                    annotation_request['label'] = oracle_label
-                    low_confidence_labels.append(annotation_request)
-            elif max(distribution) > pseudo_label_cutoff and (
-                            distribution[
-                                self.empty_label_index] < 0.001 or random.random() < 0.001):
-                annotation_request['label'] = predicted_label
-                high_confidence_labels.append(annotation_request)
-            elif low_conf_cutoff < entropy:
-                annotation_request['label'] = oracle_label
-                low_confidence_labels.append(annotation_request)
-        return low_confidence_labels, high_confidence_labels
-
-    def aggressive_annotation(self,
-                              sentence,
-                              sentence_number,
-                              span_to_gold_label,
-                              low_conf_cutoff,
-                              seen):
-        if len(span_to_gold_label) == 0:
-            return []  # , []
-        lstm_outputs = self._featurize_sentence(sentence, is_train=False)
-        encodings = []
-        spans = span_to_gold_label.keys()
-        for (start, end) in spans:
-            encodings.append(self._get_span_encoding(start, end, lstm_outputs))
-        label_scores = self.f_label(dy.concatenate_to_batch(encodings))
-        label_scores_reshaped = dy.reshape(label_scores,
-                                           (self.label_vocab.size, len(encodings)))
-        label_probabilities_np = dy.softmax(label_scores_reshaped).npvalue()
-        low_confidence_labels = []
-        # high_confidence_labels = []
-        on_labels = []
-        for index, (start, end) in list(enumerate(spans)):
-            distribution = label_probabilities_np[:, index]
-            entropy = stats.entropy(distribution)
-            oracle_label = span_to_gold_label[(start, end)]
-            annotation_request = dict(
-                sentence_number=sentence_number,
-                left=start,
-                right=end,
-                entropy=entropy,
-                non_constituent_probability=distribution[0],
-                label=oracle_label
-            )
-            if (start, end) in seen:
-                del span_to_gold_label[(start, end)]
-                continue
-            if low_conf_cutoff < entropy and distribution[self.empty_label_index] < 0.5:
-                # annotation_request['label'] = oracle_label
-                low_confidence_labels.append(annotation_request)
-            elif entropy < 10 ** -5 and distribution[self.empty_label_index] > 0.99:
-                del span_to_gold_label[(start, end)]
-                # if entropy > 10 ** -7:
-                #     high_confidence_labels.append(annotation_request)
-            if np.max(distribution) > distribution[self.empty_label_index]:
-                on_labels.append(annotation_request)
-
-        for index, label_a in enumerate(on_labels):
-            span_a = (label_a['left'], label_a['right'])
-            for label_b in on_labels[index + 1:]:
-                span_b = (label_b['left'], label_b['right'])
-                if check_overlap(span_a, span_b):
-                    label_a['entropy'] = 10
-                    low_confidence_labels.append(label_a)
-                    label_b['entropy'] = 10
-                    low_confidence_labels.append(label_b)
-
-        return low_confidence_labels  # , high_confidence_labels
-
     def compute_label_distributions(self, sentence, is_train, elmo_embeddings, cur_word_index):
         lstm_outputs = self._featurize_sentence(sentence, is_train=is_train,
                                                 elmo_embeddings=elmo_embeddings,
@@ -491,7 +363,8 @@ class TopDownParser(object):
         label_log_probabilities = self._encodings_to_label_log_probabilities(encodings)
         return span_to_index, label_log_probabilities
 
-    def span_parser(self, sentence, is_train, elmo_embeddings, gold=None):
+
+    def _span_parser_predict_pos(self, sentence, is_train, elmo_embeddings, gold=None):
         if gold is not None:
             assert isinstance(gold, ParseNode)
 
@@ -499,20 +372,26 @@ class TopDownParser(object):
 
         other_encodings = []
         single_word_encodings = []
-        span_to_index = {}
+        temporary_span_to_index = {}
         for left in range(len(sentence)):
             for right in range(left + 1, len(sentence) + 1):
                 encoding = self._get_span_encoding(left, right, lstm_outputs)
                 span = (left, right)
-
-                if right - left > 1:
-                    span_to_index[span] = len(other_encodings)
-                    other_encodings.append(encoding)
-                else:
-                    span_to_index[span] = len(single_word_encodings)
+                if right - left == 1:
+                    temporary_span_to_index[span] = len(single_word_encodings)
                     single_word_encodings.append(encoding)
+                else:
+                    temporary_span_to_index[span] = len(other_encodings)
+                    other_encodings.append(encoding)
 
         encodings = single_word_encodings + other_encodings
+        span_to_index = {}
+        for span, index in temporary_span_to_index.items():
+            if span[1] - span[0] == 1:
+                new_index = index
+            else:
+                new_index = index + len(single_word_encodings)
+            span_to_index[span] = new_index
         span_encodings = dy.rectify(dy.reshape(self.f_encoding(dy.concatenate_to_batch(encodings)),
                                     (self.hidden_dim, len(encodings))))
         label_scores = self.f_label(span_encodings)
@@ -523,34 +402,90 @@ class TopDownParser(object):
         tag_scores = self.f_tag(single_word_span_encodings)
         tag_scores_reshaped = dy.reshape(tag_scores,
                                          (self.tag_vocab.size, len(single_word_encodings)))
-        tag_log_probabilities_np = dy.log_softmax(tag_scores_reshaped).npvalue()
+        tag_log_probabilities = dy.log_softmax(tag_scores_reshaped)
 
-        total_loss = dy.zeros(1)
         if is_train:
-            for start in range(0, len(sentence)):
-                for end in range(start + 1, len(sentence) + 1):
-                    gold_label = gold.oracle_label(start, end)
-                    gold_label_index = self.label_vocab.index(gold_label)
-                    index = span_to_index[(start, end)]
-                    total_loss -= label_log_probabilities[gold_label_index][index]
-            return None, total_loss
+            total_loss = dy.zeros(1)
+            span_to_gold_label = get_all_spans(gold)
+            for span, oracle_label in span_to_gold_label.items():
+                oracle_label_index = self.label_vocab.index(oracle_label)
+                index = span_to_index[span]
+                if span[1] - span[0] == 1:
+                    oracle_tag = sentence[span[0]][0]
+                    total_loss -= tag_log_probabilities[self.tag_vocab.index(oracle_tag)][index]
+                total_loss -= label_log_probabilities[oracle_label_index][index]
+            return total_loss
         else:
             label_log_probabilities_np = label_log_probabilities.npvalue()
+            tag_log_probabilities_np = tag_log_probabilities.npvalue()
+            sentence_with_tags = []
+            num_correct = 0
+            total = 0
+            for word_index, (oracle_tag, word) in enumerate(sentence):
+                tag_index = np.argmax(tag_log_probabilities_np[:, word_index])
+                tag = self.tag_vocab.value(tag_index)
+                oracle_tag_is_deletable = oracle_tag in deletable_tags
+                predicted_tag_is_deletable = tag in deletable_tags
+                if oracle_tag is not None and oracle_tag_is_deletable != predicted_tag_is_deletable:
+                    print('falling back on gold tag', oracle_tag, tag)
+                    sentence_with_tags.append((oracle_tag, word))
+                else:
+                    sentence_with_tags.append((tag, word))
+                if oracle_tag is not None:
+                    oracle_tag_index = self.tag_vocab.index(oracle_tag)
+                    num_correct += tag_index == oracle_tag_index
+                total += 1
+            tree, additional_info = optimal_parser(label_log_probabilities_np,
+                                                   span_to_index,
+                                                   sentence_with_tags,
+                                                   self.empty_label_index,
+                                                   self.label_vocab,
+                                                   gold)
+            return tree, (additional_info, num_correct, total)
+
+    def _span_parser_given_pos(self, sentence, is_train, elmo_embeddings, gold=None):
+        if gold is not None:
+            assert isinstance(gold, ParseNode)
+
+        lstm_outputs = self._featurize_sentence(sentence, is_train=is_train, elmo_embeddings=elmo_embeddings)
+
+        encodings = []
+        span_to_index = {}
+        for left in range(len(sentence)):
+            for right in range(left + 1, len(sentence) + 1):
+                encoding = self._get_span_encoding(left, right, lstm_outputs)
+                span_to_index[(left, right)] = len(encodings)
+                encodings.append(encoding)
+
+        label_scores = self.f_label(dy.concatenate_to_batch(encodings))
+        label_scores_reshaped = dy.reshape(label_scores, (self.label_vocab.size, len(encodings)))
+        label_log_probabilities = dy.log_softmax(label_scores_reshaped)
+
+        if is_train:
+            total_loss = dy.zeros(1)
+            span_to_gold_label = get_all_spans(gold)
+            for span, oracle_label in span_to_gold_label.items():
+                oracle_label_index = self.label_vocab.index(oracle_label)
+                index = span_to_index[span]
+                total_loss -= label_log_probabilities[oracle_label_index][index]
+            return total_loss
+        else:
+            label_log_probabilities_np = label_log_probabilities.npvalue()
+            num_correct = 0
+            total = 0
             tree, additional_info = optimal_parser(label_log_probabilities_np,
                                                    span_to_index,
                                                    sentence,
                                                    self.empty_label_index,
                                                    self.label_vocab,
                                                    gold)
-            num_correct = 0
-            total = 0
-            for word_index in range(len(sentence)):
-                tag_index = np.argmax(tag_log_probabilities_np[:, word_index])
-                oracle_tag_index = self.tag_vocab.index(sentence[word_index][0])
-                num_correct += tag_index == oracle_tag_index
-                total += 1
-
             return tree, (additional_info, num_correct, total)
+
+    def span_parser(self, sentence, is_train, elmo_embeddings, gold=None):
+        if self.predict_pos:
+            return self._span_parser_predict_pos(sentence, is_train, elmo_embeddings, gold)
+        else:
+            return self._span_parser_given_pos(sentence, is_train, elmo_embeddings, gold)
 
     def fine_tune_confidence(self, sentence, lmbd, alpha, elmo_embeddings, cur_word_index, gold):
         lstm_outputs = self._featurize_sentence(sentence, is_train=False,

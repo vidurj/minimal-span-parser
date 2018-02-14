@@ -35,13 +35,15 @@ class Vocabulary(object):
             self.indices[value] = len(self.values) - 1
             return self.indices[value]
 
+        elif '|' in value:
+            return self.index(value.split('|')[0])
+
         else:
             print("Unknown value: {}".format(value))
             print(self.counts)
             assert isinstance(value, tuple)
             assert len(value) > 1
             return self.index(value[1:])
-            raise ValueError("Unknown value: {}".format(value))
 
     def count(self, value):
         return self.counts[value]

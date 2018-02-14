@@ -16,7 +16,9 @@ class FScore(object):
             self.recall, self.precision, self.fscore)
 
 
-def evalb(evalb_dir, gold_trees, predicted_trees, name, args, erase_labels=False, flatten=False):
+def evalb(evalb_dir, gold_trees, predicted_trees, name, args, erase_labels=False, flatten=False, expt_name=None):
+    if expt_name is None:
+        expt_name = args.expt_name
     assert os.path.exists(evalb_dir)
     evalb_program_path = os.path.join(evalb_dir, "evalb")
     evalb_param_path = os.path.join(evalb_dir, "COLLINS.prm")
@@ -35,15 +37,15 @@ def evalb(evalb_dir, gold_trees, predicted_trees, name, args, erase_labels=False
         #     gold_leaf.word == predicted_leaf.word
         #     for gold_leaf, predicted_leaf in zip(gold_leaves, predicted_leaves))
 
-    if not os.path.exists(args.expt_name):
-        os.mkdir(args.expt_name)
+    if not os.path.exists(expt_name):
+        os.mkdir(expt_name)
 
-    with open(os.path.join(args.expt_name, "params.txt"), "w") as f:
+    with open(os.path.join(expt_name, "params.txt"), "w") as f:
         f.write(str(args))
 
-    gold_path = os.path.join(args.expt_name, name + "-gold.txt")
-    predicted_path = os.path.join(args.expt_name, name + "-predicted.txt")
-    output_path = os.path.join(args.expt_name, name + "-output.txt")
+    gold_path = os.path.join(expt_name, name + "-gold.txt")
+    predicted_path = os.path.join(expt_name, name + "-predicted.txt")
+    output_path = os.path.join(expt_name, name + "-output.txt")
     with open(gold_path, "w") as outfile:
         for tree in gold_trees:
             if flatten:
