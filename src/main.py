@@ -399,11 +399,11 @@ def load_or_create_model(args, parses_for_vocab):
             args.dropout
         )
         print('populating params from 40k_elmo.model')
-        parser.f_label.param_collection().populate('40k_elmo.model', '/ffn')
-        parser.word_embeddings.populate('40k_elmo.model', '/word-embeddings')
-        parser.tag_embeddings.populate('40k_elmo.model', '/tag-embeddings')
+        # parser.f_label.param_collection().populate('40k_elmo.model', '/ffn')
+        # parser.word_embeddings.populate('40k_elmo.model', '/word-embeddings')
+        # parser.tag_embeddings.populate('40k_elmo.model', '/tag-embeddings')
         # parser.mlp.populate('2-predict-pos.model', '/mlp')
-        parser.lstm.param_collection().populate('40k_elmo.model', '/lstm')
+        # parser.lstm.param_collection().populate('40k_elmo.model', '/lstm')
         # parser.elmo_weights.populate('predict-pos.model', '/elmo-weights')
         # parser.f_encoding.weights[0].populate('predict-pos.model', '/encoding-weights')
         # parser.f_encoding.biases[0].populate('predict-pos.model', '/encoding-biases')
@@ -1132,6 +1132,70 @@ def train_on_brackets(args):
             save_latest_model(args.model_path_base, parser)
 
 
+def bracket_mcqs(args):
+    with open('../108train.brackets.txt', 'r') as f:
+        text = f.read()
+        assert '[' not in text and ']' not in text
+        sentences = text.splitlines()
+
+
+
+
+    random.shuffle(sentences)
+    train_indices = [1, 50, 30, 24, 29, 17, 51, 35, 53, 57, 5, 3, 55, 87, 74, 6, 61, 46, 103, 91, 69, 21, 8, 82, 78, 58, 99, 104, 26, 2, 73, 16, 93, 52, 45, 38, 71, 43, 33, 72, 54, 59, 20, 106, 84, 85, 88, 95, 97, 36, 34, 68, 15, 94]
+    test_indices = [86, 101, 23, 56, 79, 98, 10, 62, 27, 70, 92, 0, 107, 100, 48, 44, 14, 77, 25, 66, 19, 90, 12, 4, 89, 75, 28, 37, 81, 31, 83, 13, 42, 60, 40, 7, 102, 96, 105, 9, 80, 18, 63, 64, 41, 22, 49, 67, 11, 65, 32, 39, 76, 47]
+
+    markers = {'(A)': 0, '(B)': 1, '(C)': 2, '(D)':3}
+    more_markers = [['(A)', '(B)', '(C)', '(D)'],
+                    ['A.', 'B.', 'C.', 'D.'],
+                    ['a.', 'b.', 'c.', 'd.'],
+                    ['i', 'ii', 'iii', 'iv'],
+                    ['1)', '2)', '3)', '4)']]
+
+    def annotate_and_write_to_file(file_name, sentences):
+        annotated_sentences = []
+        for sentence in sentences:
+            for marker in markers:
+                sentence = sentence.replace(marker, ' ' + marker + ' ')
+            for mapped_markers in more_markers:
+                tokens = sentence.split()
+                tokens_with_bracketing = []
+                seen_marker = False
+                num_open_brackets = 0
+                num_close_brackets = 0
+                for index in range(1, len(tokens)):
+                    token = tokens[index]
+                    if token in markers:
+                        if not seen_marker:
+                            tokens_with_bracketing.append('[')
+                            num_open_brackets += 1
+                        seen_marker = True
+                        mapped_marker = mapped_markers[markers[token]]
+                        tokens_with_bracketing.extend(['[', '[', mapped_marker, ']'])
+                        num_open_brackets += 2
+                        num_close_brackets += 1
+                    elif tokens[index - 1] in markers:
+                        tokens_with_bracketing.extend([token, ']'])
+                        num_close_brackets += 1
+                    else:
+                        tokens_with_bracketing.append(token)
+                assert seen_marker
+                tokens_with_bracketing.append(']')
+                num_close_brackets += 1
+                assert num_open_brackets == num_close_brackets, (
+                num_open_brackets, num_close_brackets)
+                annotated_sentences.append(' '.join(tokens_with_bracketing))
+
+        with open(file_name, 'w') as f:
+            f.write('\n'.join(annotated_sentences))
+
+    annotate_and_write_to_file('../108train.train_sentences.txt',
+                               [sentences[index] for index in train_indices])
+    annotate_and_write_to_file('../108train.test_sentences.txt',
+                               [sentences[index] for index in test_indices])
+
+
+
 def save_latest_model(model_path_base, parser):
     latest_model_path = "{}_latest_model".format(model_path_base)
     for ext in [".data", ".meta"]:
@@ -1148,7 +1212,8 @@ def run_train_question_bank_stanford_split(args):
     if not os.path.exists(args.expt_name):
         os.mkdir(args.expt_name)
 
-    all_parses = load_parses('questionbank/all_qb_trees.txt')
+    all_trees = trees.load_trees('questionbank/all_qb_trees.txt')
+    all_parses = [tree.convert() for tree in all_trees]
 
 
     print("Loaded {:,} trees.".format(len(all_parses)))
@@ -1159,19 +1224,10 @@ def run_train_question_bank_stanford_split(args):
 
 
     dev_and_test_sentences = set()
-    dev_parses = []
-    dev_sentence_number_to_sentence_and_word_index = {}
-    word_index = 0
     for index in stanford_dev_indices:
         parse = all_parses[index]
         sentence = [(leaf.tag, leaf.word) for leaf in parse.leaves]
-        dev_sentence_number_to_sentence_and_word_index[len(dev_parses)] = (sentence, word_index)
-        word_index += len(sentence)
-        dev_parses.append(parse)
         dev_and_test_sentences.add(tuple(sentence))
-    final_dev_word_index = word_index
-
-    dev_treebank = [parse.convert() for parse in dev_parses]
 
     for index in stanford_test_indices:
         parse = all_parses[index]
@@ -1179,45 +1235,26 @@ def run_train_question_bank_stanford_split(args):
         dev_and_test_sentences.add(tuple(sentence))
 
 
-    train_parses = []
-    train_sentence_number_to_sentence_and_word_index = {}
-    word_index = 0
     stanford_train_indices = []
     for index in tentative_stanford_train_indices:
         parse = all_parses[index]
         sentence = [(leaf.tag, leaf.word) for leaf in parse.leaves]
         if tuple(sentence) not in dev_and_test_sentences:
-            train_sentence_number_to_sentence_and_word_index[len(train_parses)] = (sentence, word_index)
-            word_index += len(sentence)
-            train_parses.append(parse)
             stanford_train_indices.append(index)
-    final_train_word_index = word_index
-
-
-    train_embeddings = []
-    dev_embeddings = []
-    with h5py.File('question_bank_elmo_embeddings.hdf5', 'r') as h5f:
-        for index in stanford_train_indices:
-            train_embeddings.append(h5f[str(index)][:, :, :])
-
-        for index in stanford_dev_indices:
-            dev_embeddings.append(h5f[str(index)][:, :, :])
-
-    train_embeddings_np = np.swapaxes(np.concatenate(train_embeddings, axis=1), axis1=0,
-                                      axis2=1)
-    assert final_train_word_index == len(train_embeddings_np), (final_train_word_index, len(train_embeddings_np))
-
-    dev_embeddings_np = np.swapaxes(np.concatenate(dev_embeddings, axis=1), axis1=0,
-                                    axis2=1)
-    assert final_dev_word_index == len(dev_embeddings_np), (final_dev_word_index, len(dev_embeddings_np))
 
 
 
-    print("We have {:,} train trees.".format(len(train_parses)))
+    qb_embeddings_file = h5py.File('../question-bank.hdf5', 'r')
+
+
+
+
+    print("We have {:,} train trees.".format(len(stanford_train_indices)))
 
     wsj_train = load_parses('data/train.trees')
-
-    parser, model = load_or_create_model(args, train_parses + wsj_train)
+    qb_train_parses = [all_parses[index] for index in stanford_train_indices]
+    qb_dev_treebank = [all_trees[index] for index in stanford_dev_indices]
+    parser, model = load_or_create_model(args, qb_train_parses + wsj_train)
     trainer = dy.AdamTrainer(model)
 
     total_processed = 0
@@ -1235,16 +1272,19 @@ def run_train_question_bank_stanford_split(args):
         dev_start_time = time.time()
 
         dev_predicted = []
-        for index, tree in enumerate(dev_treebank):
+        for tree_index in stanford_dev_indices:
             if len(dev_predicted) % 100 == 0:
                 dy.renew_cg()
-                dev_embeddings = dy.inputTensor(dev_embeddings_np)
 
-            sentence, cur_word_index = dev_sentence_number_to_sentence_and_word_index[index]
-            predicted, _ = parser.span_parser(sentence, is_train=False, elmo_embeddings=dev_embeddings, cur_word_index=cur_word_index)
+            tree = all_trees[tree_index]
+            sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
+            embeddings_np = qb_embeddings_file[str(tree_index)][:, :, :]
+            assert embeddings_np.shape[1] == len(sentence)
+            embeddings = dy.inputTensor(embeddings_np)
+            predicted, _ = parser.span_parser(sentence, is_train=False, elmo_embeddings=embeddings)
             dev_predicted.append(predicted.convert())
 
-        dev_fscore = evaluate.evalb(args.evalb_dir, dev_treebank, dev_predicted, args=args,
+        dev_fscore = evaluate.evalb(args.evalb_dir, qb_dev_treebank, dev_predicted, args=args,
                                     name="dev")
 
         print(
@@ -1271,22 +1311,24 @@ def run_train_question_bank_stanford_split(args):
             print("Saving new best model to {}...".format(best_dev_model_path))
             dy.save(best_dev_model_path, [parser])
 
-    wsj_indices = []
-    if args.resample == 'true':
-        assert args.num_samples == 'false'
-        print('training on resampled data')
-        tree_indices = [random.randint(0, len(train_parses) - 1) for _ in range(len(train_parses))]
-    elif args.num_samples != 'false':
+
+    # if args.resample == 'true':
+    #     raise Exception('unimplemented')
+        # assert args.num_samples == 'false'
+        # print('training on resampled data')
+        # tree_indices = [random.randint(0, len(train_parses) - 1) for _ in range(len(train_parses))]
+    if args.num_samples != 'false':
         print('restricting to', args.num_samples, 'samples')
-        tree_indices = list(range(len(train_parses)))
-        random.shuffle(tree_indices)
-        tree_indices = tree_indices[:int(args.num_samples)]
+        random.shuffle(stanford_train_indices)
+        tree_indices = stanford_train_indices[:int(args.num_samples)]
     else:
         print('training on original data')
-        tree_indices = list(range(len(train_parses)))
+        tree_indices = stanford_train_indices
 
     if args.train_on_wsj == 'true':
         print('training on wsj')
+        wsj_embeddings_file = h5py.File('../wsj-train.hdf5', 'r')
+        wsj_indices = list(range(39832))
     else:
         print('not training on wsj')
 
@@ -1299,33 +1341,27 @@ def run_train_question_bank_stanford_split(args):
 
         for start_index in range(0, len(tree_indices), args.batch_size):
             dy.renew_cg()
-            train_embeddings = dy.inputTensor(train_embeddings_np)
+
             batch_losses = []
-            for index in tree_indices[start_index: start_index + args.batch_size]:
-                tree = train_parses[index]
-                sentence, cur_word_index = train_sentence_number_to_sentence_and_word_index[index]
-                _, loss = parser.span_parser(sentence, is_train=True, gold=tree, elmo_embeddings=train_embeddings, cur_word_index=cur_word_index)
+            for tree_index in tree_indices[start_index: start_index + args.batch_size]:
+                tree = all_parses[tree_index]
+                sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
+                embeddings_np = qb_embeddings_file[str(tree_index)][:, :, :]
+                assert embeddings_np.shape[1] == len(sentence), (embeddings_np.shape, len(sentence), sentence)
+                embeddings = dy.inputTensor(embeddings_np)
+                loss = parser.span_parser(sentence, is_train=True, gold=tree, elmo_embeddings=embeddings)
                 batch_losses.append(loss)
                 total_processed += 1
                 current_processed += 1
 
             if args.train_on_wsj == 'true':
-                if not wsj_indices:
-                    wsj_indices = list(range(398))
-                    random.shuffle(wsj_indices)
-                wsj_batch_index = wsj_indices.pop()
-                h5f = h5py.File(
-                    'ptb_elmo_embeddings/train/batch_{}_embeddings.h5'.format(wsj_batch_index), 'r')
-                wsj_train_embeddings = dy.inputTensor(h5f['embeddings'][:, :, :])
-                h5f.close()
-                wsj_cur_word_index = 0
-                for index in range(wsj_batch_index * 100, wsj_batch_index * 100 + 100):
-                    tree = wsj_train[index]
+                random.shuffle(wsj_indices)
+                for tree_index in wsj_indices[:10]:
+                    tree = wsj_train[tree_index]
                     sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-                    _, loss = parser.span_parser(sentence, is_train=True, gold=tree,
-                                                 elmo_embeddings=wsj_train_embeddings,
-                                                 cur_word_index=wsj_cur_word_index)
-                    wsj_cur_word_index += len(sentence)
+                    embeddings = dy.inputTensor(wsj_embeddings_file[str(tree_index)][:, :, :])
+                    loss = parser.span_parser(sentence, is_train=True, gold=tree,
+                                                 elmo_embeddings=embeddings)
                     batch_losses.append(loss)
 
             batch_loss = dy.average(batch_losses)
@@ -1350,7 +1386,7 @@ def run_train_question_bank_stanford_split(args):
                 )
             )
 
-        if epoch % 100 == 0:
+        if epoch % 10 == 0:
             check_dev()
 
 def run_train_question_bank(args):
@@ -2718,7 +2754,7 @@ def main():
         subparser.add_argument(arg)
 
     subparser.add_argument("--train-on-wsj", required=True)
-    subparser.add_argument("--resample", required=True)
+    # subparser.add_argument("--resample", required=True)
     subparser.add_argument("--num-samples", required=True)
     subparser.add_argument("--expt-name", required=True)
     subparser.add_argument("--model-path-base", required=True)
@@ -2852,10 +2888,12 @@ def main():
     subparser.set_defaults(callback=collect_random_constituents)
     subparser.add_argument("--parses", type=str, required=True)
 
-
     subparser = subparsers.add_parser("fine-tune-confidence")
     subparser.set_defaults(callback=fine_tune_confidence)
     subparser.add_argument("--model-path-base", required=True)
+
+    subparser = subparsers.add_parser("bracket-mcqs")
+    subparser.set_defaults(callback=bracket_mcqs)
 
     args = parser.parse_args()
     args.callback(args)

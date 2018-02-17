@@ -56,6 +56,64 @@ def resolve_conflicts_greedily(chosen_spans):
     return chosen_spans, None
 
 
+def optimal_tree_construction(span_to_label, sentence, span_to_on_score):
+    conflicting = set()
+    for span_a in span_to_label:
+        for span_b in span_to_label:
+            if check_overlap(span_a, span_b):
+                conflicting.add(span_a)
+    cache = {}
+
+    def helper(left, right):
+        if (left, right) in cache:
+            return cache[(left, right)]
+
+        if (left, right) in span_to_label:
+            label = span_to_label[(left, right)]
+            assert label != ()
+        else:
+            assert left != 0 or right != len(sentence)
+            label = ()
+
+        if right - left == 1:
+            tag, word = sentence[left]
+            tree = LeafParseNode(left, tag, word)
+            score = 0
+            if label:
+                tree = InternalParseNode(label, [tree])
+                score += span_to_on_score[(left, right)]
+            return [tree], score
+
+        split_options = []
+        for split in range(right - 1, left, -1):
+            if (left, split) in span_to_label:
+                split_options.append(split)
+                if (left, split) not in conflicting:
+                    break
+        if len(split_options) == 0:
+            split_options.append(left + 1)
+
+        best_option_score = None
+        for split in split_options:
+            left_trees, left_score = helper(left, split)
+            right_trees, right_score = helper(split, right)
+            children = left_trees + right_trees
+            score = left_score + right_score
+            if label:
+                children = [InternalParseNode(label, children)]
+                score += span_to_on_score[(left, right)]
+            if best_option_score is None or score > best_option_score:
+                best_option_score = score
+                best_option = children
+        response = best_option, best_option_score
+        cache[(left, right)] = response
+        return response
+
+    trees = helper(0, len(sentence))
+    assert len(trees) == 1
+    return trees[0]
+
+
 # Does not assume that chosen_spans do not overlap. Throws an error if
 def construct_tree_from_spans(span_to_label, sentence):
     used = set()
@@ -125,19 +183,23 @@ def optimal_parser(label_log_probabilities_np,
                 gold_parse_log_likelihood += oracle_label_log_probability
                 confusion_matrix[(label, oracle_label)] += 1
 
-        choices, _ = resolve_conflicts_optimaly(greedily_chosen_spans)
+        choices, _ = resolve_conflicts_greedily(greedily_chosen_spans)
         span_to_label = {}
         predicted_parse_log_likelihood = np.sum(label_log_probabilities_np[empty_label_index, :])
         adjusted = label_log_probabilities_np - label_log_probabilities_np[empty_label_index, :]
+        span_to_on_score = {}
         for choice in choices:
             span_to_label[(choice[0], choice[1])] = label_vocab.value(choice[4])
+            span_to_on_score[(choice[0], choice[1])] = 
             span_index = span_to_index[(choice[0], choice[1])]
             predicted_parse_log_likelihood += adjusted[choice[4], span_index]
         num_spans_forced_off = len(greedily_chosen_spans) - len(span_to_label)
-        return span_to_label, (predicted_parse_log_likelihood, confusion_matrix, num_spans_forced_off, rank, gold_parse_log_likelihood)
+        return span_to_label, (
+            predicted_parse_log_likelihood, confusion_matrix, num_spans_forced_off, rank,
+            gold_parse_log_likelihood)
 
     span_to_label, additional_info = choose_consistent_spans()
-    tree = construct_tree_from_spans(span_to_label, sentence)
+    tree = optimal_tree_construction(span_to_label, sentence, span_to_on_score)
     return tree, additional_info
 
 
@@ -194,6 +256,7 @@ class TopDownParser(object):
     ):
         use_elmo = True
         predict_pos = True
+        assert predict_pos
         self.spec = locals()
         self.spec.pop("self")
         self.spec.pop("model")
@@ -224,11 +287,11 @@ class TopDownParser(object):
             self.model,
             dy.VanillaLSTMBuilder)
 
-
-
         if not predict_pos:
-            self.tag_embeddings = self.model.add_lookup_parameters((tag_vocab.size, tag_embedding_dim))
-            self.f_label = Feedforward(self.mlp, 2 * lstm_dim, [label_hidden_dim], label_vocab.size)
+            self.tag_embeddings = self.model.add_lookup_parameters(
+                (tag_vocab.size, tag_embedding_dim))
+            self.f_label = Feedforward(self.mlp, 2 * lstm_dim, [label_hidden_dim],
+                                       label_vocab.size)
         else:
             self.f_encoding = Feedforward(
                 self.mlp, 2 * lstm_dim, [], label_hidden_dim)
@@ -256,6 +319,7 @@ class TopDownParser(object):
         return cls(model, **spec)
 
     def _featurize_sentence(self, sentence, is_train, elmo_embeddings):
+        # assert len(sentence) == elmo_embeddings.dim()[1], (elmo_embeddings.dim(), len(sentence))
         if is_train:
             self.lstm.set_dropout(self.dropout)
         else:
@@ -265,7 +329,8 @@ class TopDownParser(object):
         for tag, word in [(START, START)] + sentence + [(STOP, STOP)]:
             if word not in (START, STOP):
                 count = self.word_vocab.count(word)
-                if not count or (is_train and (np.random.rand() < 1 / (1 + count) or np.random.rand() < 0.1)):
+                if not count or (is_train and (
+                    (np.random.rand() < 1 / (1 + count)) or (np.random.rand() < 0.1))):
                     word = UNK
             word_embedding = self.word_embeddings[self.word_vocab.index(word)]
             input_components = [word_embedding]
@@ -282,7 +347,13 @@ class TopDownParser(object):
             if not self.predict_pos:
                 tag_embedding = self.tag_embeddings[self.tag_vocab.index(tag)]
                 input_components.append(tag_embedding)
-            embeddings.append(dy.concatenate(input_components))
+
+            raw_input = dy.concatenate(input_components)
+            # if is_train:
+            #     input = dy.dropout(raw_input, p=0.1)
+            # else:
+            input = raw_input
+            embeddings.append(input)
         return self.lstm.transduce(embeddings)
 
     def _get_span_encoding(self, left, right, lstm_outputs):
@@ -305,7 +376,6 @@ class TopDownParser(object):
         # label_scores_reshaped = dy.logistic(label_scores_reshaped * 0.03124614 + 4.00097179) * 990.51641846 - 9.43100834
         return dy.log_softmax(label_scores_reshaped)
 
-
     def get_distribution_for_kbest(self, sentence, elmo_embeddings, cur_word_index):
         assert self.empty_label_index == 0, self.empty_label_index
         lstm_outputs = self._featurize_sentence(sentence, is_train=False,
@@ -318,9 +388,12 @@ class TopDownParser(object):
                 span_to_index[(start, end)] = len(encodings)
                 encodings.append(self._get_span_encoding(start, end, lstm_outputs))
 
-        label_log_probabilities_np = self._encodings_to_label_log_probabilities(encodings).npvalue()
-        non_constituent_probabilities = np.exp(label_log_probabilities_np[self.empty_label_index, :])
-        label_log_probabilities_np = np.log(10 ** -6 + np.array([non_constituent_probabilities, 1 - non_constituent_probabilities]))
+        label_log_probabilities_np = self._encodings_to_label_log_probabilities(
+            encodings).npvalue()
+        non_constituent_probabilities = np.exp(
+            label_log_probabilities_np[self.empty_label_index, :])
+        label_log_probabilities_np = np.log(10 ** -6 + np.array(
+            [non_constituent_probabilities, 1 - non_constituent_probabilities]))
         return (label_log_probabilities_np, span_to_index)
 
     def produce_parse_forest(self, sentence, required_probability_mass):
@@ -363,12 +436,12 @@ class TopDownParser(object):
         label_log_probabilities = self._encodings_to_label_log_probabilities(encodings)
         return span_to_index, label_log_probabilities
 
-
     def _span_parser_predict_pos(self, sentence, is_train, elmo_embeddings, gold=None):
         if gold is not None:
             assert isinstance(gold, ParseNode)
 
-        lstm_outputs = self._featurize_sentence(sentence, is_train=is_train, elmo_embeddings=elmo_embeddings)
+        lstm_outputs = self._featurize_sentence(sentence, is_train=is_train,
+                                                elmo_embeddings=elmo_embeddings)
 
         other_encodings = []
         single_word_encodings = []
@@ -393,7 +466,7 @@ class TopDownParser(object):
                 new_index = index + len(single_word_encodings)
             span_to_index[span] = new_index
         span_encodings = dy.rectify(dy.reshape(self.f_encoding(dy.concatenate_to_batch(encodings)),
-                                    (self.hidden_dim, len(encodings))))
+                                               (self.hidden_dim, len(encodings))))
         label_scores = self.f_label(span_encodings)
         label_scores_reshaped = dy.reshape(label_scores, (self.label_vocab.size, len(encodings)))
         label_log_probabilities = dy.log_softmax(label_scores_reshaped)
@@ -421,6 +494,7 @@ class TopDownParser(object):
             sentence_with_tags = []
             num_correct = 0
             total = 0
+            # print('output has gold pos tags')
             for word_index, (oracle_tag, word) in enumerate(sentence):
                 tag_index = np.argmax(tag_log_probabilities_np[:, word_index])
                 tag = self.tag_vocab.value(tag_index)
@@ -444,10 +518,12 @@ class TopDownParser(object):
             return tree, (additional_info, num_correct, total)
 
     def _span_parser_given_pos(self, sentence, is_train, elmo_embeddings, gold=None):
+        print('Using Given POS')
         if gold is not None:
             assert isinstance(gold, ParseNode)
 
-        lstm_outputs = self._featurize_sentence(sentence, is_train=is_train, elmo_embeddings=elmo_embeddings)
+        lstm_outputs = self._featurize_sentence(sentence, is_train=is_train,
+                                                elmo_embeddings=elmo_embeddings)
 
         encodings = []
         span_to_index = {}
@@ -489,8 +565,7 @@ class TopDownParser(object):
 
     def fine_tune_confidence(self, sentence, lmbd, alpha, elmo_embeddings, cur_word_index, gold):
         lstm_outputs = self._featurize_sentence(sentence, is_train=False,
-                                                elmo_embeddings=elmo_embeddings,
-                                                cur_word_index=cur_word_index)
+                                                elmo_embeddings=elmo_embeddings)
         encodings = []
         span_to_index = {}
         for start in range(0, len(sentence)):
