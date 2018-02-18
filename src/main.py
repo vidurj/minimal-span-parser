@@ -398,7 +398,7 @@ def load_or_create_model(args, parses_for_vocab):
             args.split_hidden_dim,
             args.dropout
         )
-        print('populating params from 40k_elmo.model')
+        # print('populating params from 40k_elmo.model')
         # parser.f_label.param_collection().populate('40k_elmo.model', '/ffn')
         # parser.word_embeddings.populate('40k_elmo.model', '/word-embeddings')
         # parser.tag_embeddings.populate('40k_elmo.model', '/tag-embeddings')
@@ -670,6 +670,10 @@ def evaluate_bro_co(args):
     if not os.path.exists(args.expt_name):
         os.mkdir(args.expt_name)
 
+    model = dy.ParameterCollection()
+    [parser] = dy.load(args.model_path_base, model)
+    assert parser.use_elmo == args.use_elmo, (parser.use_elmo, args.use_elmo)
+
     dirs = ['cf', 'cg', 'ck', 'cl', 'cm', 'cn', 'cp', 'cr']
     for dir in dirs:
         print('-' * 100)
@@ -682,22 +686,28 @@ def evaluate_bro_co(args):
         treebank = trees.load_trees(cleaned_corpus_path, strip_top=True, filter_none=True)
         sentences = [[(leaf.tag, leaf.word) for leaf in tree.leaves] for tree in treebank]
         tokenized_lines = [' '.join([word for pos, word in sentence]) for sentence in sentences]
-        embedding_file = compute_embeddings(tokenized_lines, expt_name)
-
-        model = dy.ParameterCollection()
-        [parser] = dy.load(args.model_path_base, model)
-
+        if args.use_elmo:
+            embedding_file = compute_embeddings(tokenized_lines, expt_name)
+        else:
+            embedding_file = None
         dev_predicted = []
+        num_correct = 0
+        total = 0
         for tree_index, tree in enumerate(treebank):
             if tree_index % 100 == 0:
                 print(tree_index)
                 dy.renew_cg()
             sentence = sentences[tree_index]
-            embeddings_np = embedding_file[str(tree_index)][:, :, :]
-            assert embeddings_np.shape[1] == len(sentence), (embeddings_np.shape[1], len(sentence))
-            embeddings = dy.inputTensor(embeddings_np)
-            predicted, _ = parser.span_parser(sentence, is_train=False,
+            if args.use_elmo:
+                embeddings_np = embedding_file[str(tree_index)][:, :, :]
+                assert embeddings_np.shape[1] == len(sentence), (embeddings_np.shape[1], len(sentence))
+                embeddings = dy.inputTensor(embeddings_np)
+            else:
+                embeddings = None
+            predicted, (additional_info, c, t) = parser.span_parser(sentence, is_train=False,
                                               elmo_embeddings=embeddings)
+            num_correct += c
+            total += t
             dev_predicted.append(predicted.convert())
 
         dev_fscore_without_labels = evaluate.evalb('EVALB/', treebank, dev_predicted,
@@ -728,6 +738,10 @@ def evaluate_bro_co(args):
                                                    expt_name=expt_name)
 
         print("regular", test_fscore)
+        pos_fraction = num_correct / total
+        print('pos fraction', pos_fraction)
+        with open(expt_name + '/pos_accuracy.txt', 'w') as f:
+            f.write(str(pos_fraction))
 
 
 def run_test_qbank(args):
@@ -738,7 +752,7 @@ def run_test_qbank(args):
     model = dy.ParameterCollection()
     [parser] = dy.load(args.model_path_base, model)
 
-    treebank = trees.load_trees('questionbank/all_qb_trees.txt')
+    all_trees = trees.load_trees('questionbank/all_qb_trees.txt')
 
     if args.stanford_split == 'true':
         print('using stanford split')
@@ -755,27 +769,22 @@ def run_test_qbank(args):
             'test': range(3000, 4000)
         }
 
-    indices = split_to_indices[args.split]
-    test_treebank = [treebank[index] for index in indices]
-    test_embeddings = []
-    with h5py.File('question_bank_elmo_embeddings.hdf5', 'r') as h5f:
-        for index in indices:
-            test_embeddings.append(h5f[str(index)][:, :, :])
-
-    test_embeddings_np = np.swapaxes(np.concatenate(test_embeddings, axis=1), axis1=0, axis2=1)
+    test_indices = split_to_indices[args.split]
+    qb_embeddings_file = h5py.File('../question-bank.hdf5', 'r')
     dev_predicted = []
-    cur_word_index = 0
-    for dev_index, tree in enumerate(test_treebank):
-        if dev_index % 100 == 0:
+    for test_index in test_indices:
+        if len(dev_predicted) % 100 == 0:
             dy.renew_cg()
-            test_embeddings = dy.inputTensor(test_embeddings_np)
+        tree = all_trees[test_index]
         sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
+        test_embeddings_np = qb_embeddings_file[str(test_index)][:, :, :]
+        assert test_embeddings_np.shape[1] == len(sentence)
+        test_embeddings = dy.inputTensor(test_embeddings_np)
         predicted, _ = parser.span_parser(sentence, is_train=False,
-                                             elmo_embeddings=test_embeddings,
-                                             cur_word_index=cur_word_index)
+                                             elmo_embeddings=test_embeddings)
         dev_predicted.append(predicted.convert())
-        cur_word_index += len(sentence)
 
+    test_treebank = [all_trees[index] for index in test_indices]
     dev_fscore_without_labels = evaluate.evalb(args.evalb_dir, test_treebank, dev_predicted,
                                                args=args,
                                                erase_labels=True,
@@ -1025,7 +1034,7 @@ def train_on_brackets(args):
                 is_constituent = token == ']'
                 span = (open_bracket_indices.pop(), len(sentence))
                 temp = sentence + ["*" for _ in range(5)]
-                print(temp[span[0]: span[1]], is_constituent)
+                # print(temp[span[0]: span[1]], is_constituent)
                 sentence_number_to_bracketings[sentence_number].add((span, is_constituent))
                 if is_constituent:
                     constituent_spans.add(span)
@@ -1039,10 +1048,10 @@ def train_on_brackets(args):
                     if check_overlap(span, constituent_span):
                         assert span not in constituent_spans
                         sentence_number_to_bracketings[sentence_number].add((span, False))
-        print('-' * 40)
+        # print('-' * 40)
         assert len(open_bracket_indices) == 0, open_bracket_indices
         processed_lines.append(' '.join(sentence))
-    print(sentence_number_to_bracketings)
+    # print(sentence_number_to_bracketings)
 
     wsj_train = load_parses('data/train.trees')
     parser, model = load_or_create_model(args, wsj_train)
@@ -1051,9 +1060,8 @@ def train_on_brackets(args):
 
     wsj_embedding_file = h5py.File('../wsj-train.hdf5', 'r')
     sentences = [[(None, word) for word in line.split()] for line in processed_lines]
-
     wsj_indices = []
-
+    sentence_indices = []
     for epoch in itertools.count(start=1):
         dy.renew_cg()
 
@@ -1061,15 +1069,22 @@ def train_on_brackets(args):
         loss = dy.zeros(1)
         num_correct = 0
         num_wrong = 0
-        for sentence_number, sentence in enumerate(sentences):
-            elmo_embeddings_np = embedding_file[str(sentence_number)][:, :, :]
+
+        for _ in range(100):
+            if len(sentence_indices) == 0:
+                sentence_indices = list(range(len(sentences)))
+                random.shuffle(sentence_indices)
+
+            sentence_index = sentence_indices.pop()
+            sentence = sentences[sentence_index]
+            elmo_embeddings_np = embedding_file[str(sentence_index)][:, :, :]
             assert elmo_embeddings_np.shape[1] == len(sentence)
             elmo_embeddings = dy.inputTensor(elmo_embeddings_np)
             lstm_outputs = parser._featurize_sentence(sentence, is_train=True,
                                                     elmo_embeddings=elmo_embeddings)
             encodings = []
             span_to_index = {}
-            for ((start, end), is_constituent) in sentence_number_to_bracketings[sentence_number]:
+            for ((start, end), is_constituent) in sentence_number_to_bracketings[sentence_index]:
                 span_to_index[(start, end)] = len(encodings)
                 encodings.append(parser._get_span_encoding(start, end, lstm_outputs))
 
@@ -1083,7 +1098,7 @@ def train_on_brackets(args):
 
 
 
-            for (span, is_constituent) in sentence_number_to_bracketings[sentence_number]:
+            for (span, is_constituent) in sentence_number_to_bracketings[sentence_index]:
                 span_index = span_to_index[span]
                 non_constituent_prob_np = label_probabilities[parser.empty_label_index][span_index].scalar_value()
                 if is_constituent:
@@ -1146,11 +1161,34 @@ def bracket_mcqs(args):
     test_indices = [86, 101, 23, 56, 79, 98, 10, 62, 27, 70, 92, 0, 107, 100, 48, 44, 14, 77, 25, 66, 19, 90, 12, 4, 89, 75, 28, 37, 81, 31, 83, 13, 42, 60, 40, 7, 102, 96, 105, 9, 80, 18, 63, 64, 41, 22, 49, 67, 11, 65, 32, 39, 76, 47]
 
     markers = {'(A)': 0, '(B)': 1, '(C)': 2, '(D)':3}
-    more_markers = [['(A)', '(B)', '(C)', '(D)'],
-                    ['A.', 'B.', 'C.', 'D.'],
-                    ['a.', 'b.', 'c.', 'd.'],
-                    ['i', 'ii', 'iii', 'iv'],
-                    ['1)', '2)', '3)', '4)']]
+
+    covers = [(), ('(', ')'), (')',), ('.',)]
+    chars = [['a', 'b', 'c', 'd'],
+             ['A', 'B', 'C', 'D'],
+             ['1', '2', '3', '4'],
+             ['i', 'ii', 'iii', 'iv'],
+             ['*', '*', '*', '*']]
+
+
+    def foo():
+        more_markers = []
+        for cover in covers:
+            for charset in chars:
+                markers = []
+                for char in charset:
+                    if len(cover) == 0:
+                        marker = char
+                    elif len(cover) == 1:
+                        marker = char + cover[0]
+                    else:
+                        assert len(cover) == 2, cover
+                        marker = cover[0] + char + cover[1]
+                    markers.append(marker)
+                more_markers.append(markers)
+        return more_markers
+
+    more_markers = foo()
+    print(more_markers)
 
     def annotate_and_write_to_file(file_name, sentences):
         annotated_sentences = []
@@ -1159,11 +1197,12 @@ def bracket_mcqs(args):
                 sentence = sentence.replace(marker, ' ' + marker + ' ')
             for mapped_markers in more_markers:
                 tokens = sentence.split()
+                tokens.append(None)
                 tokens_with_bracketing = []
                 seen_marker = False
                 num_open_brackets = 0
                 num_close_brackets = 0
-                for index in range(1, len(tokens)):
+                for index in range(len(tokens) - 1):
                     token = tokens[index]
                     if token in markers:
                         if not seen_marker:
@@ -1174,14 +1213,14 @@ def bracket_mcqs(args):
                         tokens_with_bracketing.extend(['[', '[', mapped_marker, ']'])
                         num_open_brackets += 2
                         num_close_brackets += 1
-                    elif tokens[index - 1] in markers:
+                    elif tokens[index + 1] in markers and seen_marker:
                         tokens_with_bracketing.extend([token, ']'])
                         num_close_brackets += 1
                     else:
                         tokens_with_bracketing.append(token)
                 assert seen_marker
-                tokens_with_bracketing.append(']')
-                num_close_brackets += 1
+                tokens_with_bracketing.extend([']', ']'])
+                num_close_brackets += 2
                 assert num_open_brackets == num_close_brackets, (
                 num_open_brackets, num_close_brackets)
                 annotated_sentences.append(' '.join(tokens_with_bracketing))
@@ -2686,6 +2725,7 @@ def main():
     subparser.set_defaults(callback=evaluate_bro_co)
     for arg in dynet_args:
         subparser.add_argument(arg)
+    subparser.add_argument("--use-elmo", action="store_true")
     subparser.add_argument("--input-file", required=True)
     subparser.add_argument("--model-path-base", required=True)
     subparser.add_argument("--expt-name", required=True)
@@ -2766,7 +2806,7 @@ def main():
     subparser.add_argument("--split-hidden-dim", type=int, default=250)
     subparser.add_argument("--dropout", type=float, default=0.4)
     subparser.add_argument("--evalb-dir", default="EVALB/")
-    subparser.add_argument("--batch-size", type=int, default=100)
+    subparser.add_argument("--batch-size", type=int, default=10)
 
 
 

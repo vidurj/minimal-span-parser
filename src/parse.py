@@ -90,10 +90,11 @@ def optimal_tree_construction(span_to_label, sentence, span_to_on_score):
                 split_options.append(split)
                 if (left, split) not in conflicting:
                     break
-        if len(split_options) == 0:
-            split_options.append(left + 1)
-
+            if split == left + 1:
+               split_options.append(left + 1)
+        assert len(split_options) > 0
         best_option_score = None
+        best_option = None
         for split in split_options:
             left_trees, left_score = helper(left, split)
             right_trees, right_score = helper(split, right)
@@ -102,6 +103,7 @@ def optimal_tree_construction(span_to_label, sentence, span_to_on_score):
             if label:
                 children = [InternalParseNode(label, children)]
                 score += span_to_on_score[(left, right)]
+
             if best_option_score is None or score > best_option_score:
                 best_option_score = score
                 best_option = children
@@ -109,8 +111,9 @@ def optimal_tree_construction(span_to_label, sentence, span_to_on_score):
         cache[(left, right)] = response
         return response
 
-    trees = helper(0, len(sentence))
-    assert len(trees) == 1
+    trees, _ = helper(0, len(sentence))
+    assert (0, len(sentence)) in span_to_label
+    assert len(trees) == 1, len(trees)
     return trees[0]
 
 
@@ -171,7 +174,7 @@ def optimal_parser(label_log_probabilities_np,
                               span_index])  # math.log(max(1 - math.exp(off_score), 10 ** -8))
             if on_score > off_score or (start == 0 and end == len(sentence)):
                 label_index = label_log_probabilities_np[1:, span_index].argmax() + 1
-                greedily_chosen_spans.append((start, end, on_score, off_score, label_index))
+                greedily_chosen_spans.append((start, end, on_score - off_score, None, label_index))
             else:
                 label_index = empty_label_index
             if gold is not None:
@@ -183,22 +186,22 @@ def optimal_parser(label_log_probabilities_np,
                 gold_parse_log_likelihood += oracle_label_log_probability
                 confusion_matrix[(label, oracle_label)] += 1
 
-        choices, _ = resolve_conflicts_greedily(greedily_chosen_spans)
+        #choices, _ = resolve_conflicts_greedily(greedily_chosen_spans)
         span_to_label = {}
         predicted_parse_log_likelihood = np.sum(label_log_probabilities_np[empty_label_index, :])
         adjusted = label_log_probabilities_np - label_log_probabilities_np[empty_label_index, :]
         span_to_on_score = {}
-        for choice in choices:
+        for choice in greedily_chosen_spans:
             span_to_label[(choice[0], choice[1])] = label_vocab.value(choice[4])
-            span_to_on_score[(choice[0], choice[1])] = 
+            span_to_on_score[(choice[0], choice[1])] = choice[2]
             span_index = span_to_index[(choice[0], choice[1])]
             predicted_parse_log_likelihood += adjusted[choice[4], span_index]
         num_spans_forced_off = len(greedily_chosen_spans) - len(span_to_label)
-        return span_to_label, (
+        return span_to_label, span_to_on_score, (
             predicted_parse_log_likelihood, confusion_matrix, num_spans_forced_off, rank,
             gold_parse_log_likelihood)
 
-    span_to_label, additional_info = choose_consistent_spans()
+    span_to_label, span_to_on_score, additional_info = choose_consistent_spans()
     tree = optimal_tree_construction(span_to_label, sentence, span_to_on_score)
     return tree, additional_info
 
@@ -330,7 +333,7 @@ class TopDownParser(object):
             if word not in (START, STOP):
                 count = self.word_vocab.count(word)
                 if not count or (is_train and (
-                    (np.random.rand() < 1 / (1 + count)) or (np.random.rand() < 0.1))):
+                    (np.random.rand() < 1 / (1 + count)) or (np.random.rand() < 0.2))):
                     word = UNK
             word_embedding = self.word_embeddings[self.word_vocab.index(word)]
             input_components = [word_embedding]
@@ -379,8 +382,7 @@ class TopDownParser(object):
     def get_distribution_for_kbest(self, sentence, elmo_embeddings, cur_word_index):
         assert self.empty_label_index == 0, self.empty_label_index
         lstm_outputs = self._featurize_sentence(sentence, is_train=False,
-                                                elmo_embeddings=elmo_embeddings,
-                                                cur_word_index=cur_word_index)
+                                                elmo_embeddings=elmo_embeddings)
         encodings = []
         span_to_index = {}
         for start in range(0, len(sentence)):
@@ -425,8 +427,7 @@ class TopDownParser(object):
 
     def compute_label_distributions(self, sentence, is_train, elmo_embeddings, cur_word_index):
         lstm_outputs = self._featurize_sentence(sentence, is_train=is_train,
-                                                elmo_embeddings=elmo_embeddings,
-                                                cur_word_index=cur_word_index)
+                                                elmo_embeddings=elmo_embeddings)
         encodings = []
         span_to_index = {}
         for start in range(0, len(sentence)):
@@ -440,7 +441,12 @@ class TopDownParser(object):
         if gold is not None:
             assert isinstance(gold, ParseNode)
 
-        lstm_outputs = self._featurize_sentence(sentence, is_train=is_train,
+        if is_train:
+            regularization_on = random.random() > 0.1
+        else:
+            regularization_on = False
+
+        lstm_outputs = self._featurize_sentence(sentence, is_train=regularization_on,
                                                 elmo_embeddings=elmo_embeddings)
 
         other_encodings = []
@@ -500,14 +506,20 @@ class TopDownParser(object):
                 tag = self.tag_vocab.value(tag_index)
                 oracle_tag_is_deletable = oracle_tag in deletable_tags
                 predicted_tag_is_deletable = tag in deletable_tags
+                if oracle_tag is not None:
+                    oracle_tag_index = self.tag_vocab.index(oracle_tag)
+                    if oracle_tag_index == tag_index and tag != oracle_tag:
+                        if oracle_tag[0] != '-':
+                            print(tag, oracle_tag)
+                        tag = oracle_tag
+                    num_correct += tag_index == oracle_tag_index
+
                 if oracle_tag is not None and oracle_tag_is_deletable != predicted_tag_is_deletable:
-                    print('falling back on gold tag', oracle_tag, tag)
+                    # print('falling back on gold tag', oracle_tag, tag)
                     sentence_with_tags.append((oracle_tag, word))
                 else:
                     sentence_with_tags.append((tag, word))
-                if oracle_tag is not None:
-                    oracle_tag_index = self.tag_vocab.index(oracle_tag)
-                    num_correct += tag_index == oracle_tag_index
+
                 total += 1
             tree, additional_info = optimal_parser(label_log_probabilities_np,
                                                    span_to_index,
@@ -561,7 +573,8 @@ class TopDownParser(object):
         if self.predict_pos:
             return self._span_parser_predict_pos(sentence, is_train, elmo_embeddings, gold)
         else:
-            return self._span_parser_given_pos(sentence, is_train, elmo_embeddings, gold)
+            raise Exception('unimplemented')
+            # return self._span_parser_given_pos(sentence, is_train, elmo_embeddings, gold)
 
     def fine_tune_confidence(self, sentence, lmbd, alpha, elmo_embeddings, cur_word_index, gold):
         lstm_outputs = self._featurize_sentence(sentence, is_train=False,
