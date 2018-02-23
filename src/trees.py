@@ -135,7 +135,7 @@ class InternalParseNode(ParseNode):
                 new_children.extend(list(reversed(more_children)))
         new_node = create_internal_parse_node(self.label, new_children)
         assert new_node.left == self.left and new_node.right == self.right, (
-        new_node.left, self.left, new_node.right, self.right)
+            new_node.left, self.left, new_node.right, self.right)
         return new_node
 
     def delete_punctuation(self):
@@ -210,6 +210,7 @@ class LeafParseNode(ParseNode):
         self.word = word
         self.leaves = [self]
 
+
     def reset(self, left):
         self.left = left
         self.rigth = left + 1
@@ -231,7 +232,7 @@ def cleanup_text(file_path):
     num_open_parens = 0
     for line in lines:
         line = line.strip()
-        if len(line) == 0 or line[0] == '*':
+        if len(line) == 0 or line[0] == '*' or line[0] == ';':
             continue
         else:
             if num_open_parens > 0:
@@ -245,7 +246,7 @@ def cleanup_text(file_path):
     processed_file_path = file_path[:-4] + '_cleaned.txt'
     output_string = ""
     for processed_line in processed_lines:
-        output_string += processed_line.strip()[1:-1] + '\n'
+        output_string += processed_line.strip() + '\n'
     with open(processed_file_path, 'w') as f:
         f.write(output_string.strip())
     return processed_file_path
@@ -253,7 +254,17 @@ def cleanup_text(file_path):
 
 def load_trees(path, strip_top=True, filter_none=False):
     with open(path) as infile:
-        tokens = infile.read().replace("(", " ( ").replace(")", " ) ").split()
+        lines = infile.read().splitlines()
+
+    text = ''
+    for line in lines:
+        line = line.strip()
+        if line.startswith('*') or line.startswith(';'):
+            continue
+        else:
+            text += line + '\n'
+
+    tokens = tuple(text.replace("(", " ( ").replace(")", " ) ").split())
 
     def helper(index):
         trees = []
@@ -265,6 +276,12 @@ def load_trees(path, strip_top=True, filter_none=False):
                 paren_count += 1
 
             label = tokens[index]
+            if label[0] == ':':
+                label = ':'
+            elif ':' in label:
+                label = ':'.join(label.split(':')[:-1])
+            if len(label.strip()) < 1:
+                print(tokens[index])
             index += 1
 
             if tokens[index] == "(":
@@ -286,12 +303,14 @@ def load_trees(path, strip_top=True, filter_none=False):
         return trees, index
 
     trees, index = helper(0)
-    assert index == len(tokens)
+    if index < len(tokens):
+        print(tokens[index], 'must have been a (', tokens[index - 1])
+        assert index == len(tokens), (index, len(tokens))
 
     if strip_top:
         for i, tree in enumerate(trees):
             if isinstance(tree, InternalTreebankNode) and tree.label == "TOP":
-                assert len(tree.children) == 1
+                assert len(tree.children) == 1, [child.label for child in tree.children]
                 trees[i] = tree.children[0]
 
     return trees

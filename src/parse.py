@@ -257,7 +257,7 @@ class TopDownParser(object):
             use_elmo=True,
             predict_pos=True
     ):
-        use_elmo = True
+        use_elmo = False
         predict_pos = True
         assert predict_pos
         self.spec = locals()
@@ -314,6 +314,9 @@ class TopDownParser(object):
         self.empty_label = ()
         self.empty_label_index = self.label_vocab.index(self.empty_label)
 
+        # if not self.use_elmo:
+        #     self.projection = Feedforward(self.model, 100, [], 250)
+
     def param_collection(self):
         return self.model
 
@@ -327,14 +330,23 @@ class TopDownParser(object):
             self.lstm.set_dropout(self.dropout)
         else:
             self.lstm.disable_dropout()
+
+
         embeddings = []
         cur_word_index = 0
         for tag, word in [(START, START)] + sentence + [(STOP, STOP)]:
             if word not in (START, STOP):
                 count = self.word_vocab.count(word)
-                if not count or (is_train and (
-                    (np.random.rand() < 1 / (1 + count)) or (np.random.rand() < 0.2))):
+                if self.use_elmo:
+                    unk_word = (np.random.rand() < 1 / (1 + count)) or (np.random.rand() < 0.1)
+                else:
+                    unk_word = np.random.rand() < 1 / (1 + count)
+                if not count or (is_train and unk_word):
                     word = UNK
+                    # if random.random() < 0.5:
+                    #     word = UNK
+                    # else:
+                    #     word = random.choice(self.word_vocab.values)
             word_embedding = self.word_embeddings[self.word_vocab.index(word)]
             input_components = [word_embedding]
             if self.use_elmo:
@@ -347,15 +359,15 @@ class TopDownParser(object):
                                                                                dim=1)), [0])
                     cur_word_index += 1
                 input_components.append(elmo_embedding)
-            if not self.predict_pos:
-                tag_embedding = self.tag_embeddings[self.tag_vocab.index(tag)]
-                input_components.append(tag_embedding)
+            # else:
+                # input_components[-1] = dy.rectify(self.projection(input_components[-1]))
+
 
             raw_input = dy.concatenate(input_components)
-            # if is_train:
-            #     input = dy.dropout(raw_input, p=0.1)
-            # else:
-            input = raw_input
+            if is_train:
+                input = dy.dropout(raw_input, p=0.4)
+            else:
+                input = raw_input
             embeddings.append(input)
         return self.lstm.transduce(embeddings)
 
@@ -441,12 +453,7 @@ class TopDownParser(object):
         if gold is not None:
             assert isinstance(gold, ParseNode)
 
-        if is_train:
-            regularization_on = random.random() > 0.1
-        else:
-            regularization_on = False
-
-        lstm_outputs = self._featurize_sentence(sentence, is_train=regularization_on,
+        lstm_outputs = self._featurize_sentence(sentence, is_train=is_train,
                                                 elmo_embeddings=elmo_embeddings)
 
         other_encodings = []
@@ -502,23 +509,28 @@ class TopDownParser(object):
             total = 0
             # print('output has gold pos tags')
             for word_index, (oracle_tag, word) in enumerate(sentence):
-                tag_index = np.argmax(tag_log_probabilities_np[:, word_index])
-                tag = self.tag_vocab.value(tag_index)
-                oracle_tag_is_deletable = oracle_tag in deletable_tags
-                predicted_tag_is_deletable = tag in deletable_tags
-                if oracle_tag is not None:
-                    oracle_tag_index = self.tag_vocab.index(oracle_tag)
-                    if oracle_tag_index == tag_index and tag != oracle_tag:
-                        if oracle_tag[0] != '-':
-                            print(tag, oracle_tag)
-                        tag = oracle_tag
-                    num_correct += tag_index == oracle_tag_index
+                # tag_index = np.argmax(tag_log_probabilities_np[:, word_index])
+                # tag = self.tag_vocab.value(tag_index)
+                # oracle_tag_is_deletable = oracle_tag in deletable_tags
+                # predicted_tag_is_deletable = tag in deletable_tags
+                # if oracle_tag is not None and oracle_tag not in self.tag_vocab.indices:
+                #     print(oracle_tag, 'not in tag vocab')
+                #     oracle_tag = None
+                # if oracle_tag is not None:
+                #     oracle_tag_index = self.tag_vocab.index(oracle_tag)
+                #     if oracle_tag_index == tag_index and tag != oracle_tag:
+                #         if oracle_tag[0] != '-':
+                #             print(tag, oracle_tag)
+                #         tag = oracle_tag
+                #     num_correct += tag_index == oracle_tag_index
 
-                if oracle_tag is not None and oracle_tag_is_deletable != predicted_tag_is_deletable:
-                    # print('falling back on gold tag', oracle_tag, tag)
-                    sentence_with_tags.append((oracle_tag, word))
-                else:
-                    sentence_with_tags.append((tag, word))
+                # if oracle_tag is not None and oracle_tag_is_deletable != predicted_tag_is_deletable:
+                #     # print('falling back on gold tag', oracle_tag, tag)
+                #     sentence_with_tags.append((oracle_tag, word))
+                # else:
+                #     sentence_with_tags.append((tag, word))
+                assert oracle_tag is not None
+                sentence_with_tags.append((oracle_tag, word))
 
                 total += 1
             tree, additional_info = optimal_parser(label_log_probabilities_np,
