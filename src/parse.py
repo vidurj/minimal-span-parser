@@ -257,7 +257,7 @@ class TopDownParser(object):
             use_elmo=True,
             predict_pos=True
     ):
-        use_elmo = False
+        use_elmo = True
         predict_pos = True
         assert predict_pos
         self.spec = locals()
