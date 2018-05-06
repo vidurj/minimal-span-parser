@@ -298,14 +298,12 @@ class Parser(object):
         tag_scores_reshaped = dy.reshape(tag_scores,
                                          (self.tag_vocab.size, len(single_word_encodings)))
         tag_log_probabilities = dy.log_softmax(tag_scores_reshaped)
-        return label_log_probabilities,
+        return label_log_probabilities, tag_log_probabilities, span_to_index
 
     def span_parser(self, sentence, is_train, elmo_embeddings, gold=None):
+        label_log_probabilities, tag_log_probabilities, span_to_index = self._get_scores(sentence, is_train, elmo_embeddings)
         if gold is not None:
             assert isinstance(gold, ParseNode)
-
-
-
         if is_train:
             total_loss = dy.zeros(1)
             span_to_gold_label = get_all_spans(gold)

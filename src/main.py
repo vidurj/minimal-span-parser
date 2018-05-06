@@ -1459,7 +1459,7 @@ def main():
 
     subparser.add_argument("--train-on-wsj", required=True,
                            help='Whether or not to train on the WSJ corpus. '
-                                       'Must be either true or false.')
+                                       'Must be either "true" or "false".')
     subparser.add_argument("--num-samples",
                            required=True,
                            help='Number of sentences to train on from Question Bank.')
@@ -1493,14 +1493,19 @@ def main():
     subparser.set_defaults(callback=run_test_qbank)
     for arg in dynet_args:
         subparser.add_argument(arg)
-    subparser.add_argument("--stanford-split", required=True)
+    subparser.add_argument("--stanford-split",
+                           required=True,
+                           help='Whether to use the Stanford train test split. '
+                                'Must be "true" or "false".')
     subparser.add_argument("--model-path-base", required=True)
     subparser.add_argument("--question-bank-trees-path",
                            default='questionbank/all_qb_trees.txt')
     subparser.add_argument("--question-bank-elmo-embeddings-path",
                            default='../question-bank.hdf5')
     subparser.add_argument("--evalb-dir", default="EVALB/")
-    subparser.add_argument("--split", required=True)
+    subparser.add_argument("--split",
+                           required=True,
+                           help='Which split to test on. Must be "train", "dev" or "test".')
     subparser.add_argument("--expt-name", required=True)
 
 
