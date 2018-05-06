@@ -140,23 +140,20 @@ class Parser(object):
             tag_vocab,
             word_vocab,
             label_vocab,
-            tag_embedding_dim,
+            _,
             word_embedding_dim,
             lstm_layers,
             lstm_dim,
             label_hidden_dim,
-            split_hidden_dim,
+            __,
             dropout,
             use_elmo=True,
             predict_pos=True
     ):
-        use_elmo = True
-        predict_pos = True
-        assert predict_pos
         self.spec = locals()
         self.spec.pop("self")
         self.spec.pop("model")
-
+        self.use_elmo = use_elmo
         self.model = model.add_subcollection("Parser")
         self.mlp = self.model.add_subcollection("mlp")
 
@@ -166,15 +163,12 @@ class Parser(object):
         self.label_vocab = label_vocab
         self.lstm_dim = lstm_dim
         self.hidden_dim = label_hidden_dim
-        self.predict_pos = predict_pos
 
         lstm_input_dim = word_embedding_dim
-        if use_elmo:
+        if self.use_elmo:
             self.elmo_weights = self.model.parameters_from_numpy(
                 np.array([0.19608361, 0.53294581, -0.00724584]), name='elmo-averaging-weights')
             lstm_input_dim += 1024
-        if not predict_pos:
-            lstm_input_dim += tag_embedding_dim
 
         self.lstm = dy.BiRNNBuilder(
             lstm_layers,
@@ -183,25 +177,17 @@ class Parser(object):
             self.model,
             dy.VanillaLSTMBuilder)
 
-        if not predict_pos:
-            self.tag_embeddings = self.model.add_lookup_parameters(
-                (tag_vocab.size, tag_embedding_dim))
-            self.f_label = Feedforward(self.mlp, 2 * lstm_dim, [label_hidden_dim],
-                                       label_vocab.size)
-        else:
-            self.f_encoding = Feedforward(
-                self.mlp, 2 * lstm_dim, [], label_hidden_dim)
+        self.f_encoding = Feedforward(
+            self.mlp, 2 * lstm_dim, [], label_hidden_dim)
 
-            self.f_label = Feedforward(
-                self.mlp, label_hidden_dim, [], label_vocab.size)
+        self.f_label = Feedforward(
+            self.mlp, label_hidden_dim, [], label_vocab.size)
 
-            self.f_tag = Feedforward(
-                self.mlp, label_hidden_dim, [], tag_vocab.size)
+        self.f_tag = Feedforward(
+            self.mlp, label_hidden_dim, [], tag_vocab.size)
 
         self.word_embeddings = self.model.add_lookup_parameters(
             (word_vocab.size, word_embedding_dim))
-
-        self.use_elmo = use_elmo
 
         self.dropout = dropout
         self.empty_label = ()
@@ -256,10 +242,44 @@ class Parser(object):
             lstm_outputs[right + 1][self.lstm_dim:])
         return dy.concatenate([forward, backward])
 
+    def parse(self, sentence, elmo_embeddings):
+        if isinstance(sentence[0], str):
+            sentence = [(None, word) for word in sentence]
+        label_log_probabilities, tag_log_probabilities, span_to_index = \
+            self._get_scores(sentence, is_train=False, elmo_embeddings=elmo_embeddings)
+        label_log_probabilities_np = label_log_probabilities.npvalue()
+        tag_log_probabilities_np = tag_log_probabilities.npvalue()
+        sentence_with_tags = []
+        num_correct = 0
+        total = 0
+        for word_index, (oracle_tag, word) in enumerate(sentence):
+            tag_index = np.argmax(tag_log_probabilities_np[:, word_index])
+            tag = self.tag_vocab.value(tag_index)
+            oracle_tag_is_deletable = oracle_tag in DELETABLE_TAGS
+            predicted_tag_is_deletable = tag in DELETABLE_TAGS
+            if oracle_tag is not None and oracle_tag not in self.tag_vocab.indices:
+                print(oracle_tag, 'not in tag vocab')
+                oracle_tag = None
+            if oracle_tag is not None:
+                oracle_tag_index = self.tag_vocab.index(oracle_tag)
+                if oracle_tag_index == tag_index and tag != oracle_tag:
+                    if oracle_tag[0] != '-':
+                        print(tag, oracle_tag)
+                    tag = oracle_tag
+                num_correct += tag_index == oracle_tag_index
 
-    def train(self, sentence, elmo_embeddings, gold):
-        assert isinstance(gold, ParseNode)
-
+            if oracle_tag is not None and oracle_tag_is_deletable != predicted_tag_is_deletable:
+                sentence_with_tags.append((oracle_tag, word))
+            else:
+                sentence_with_tags.append((tag, word))
+            total += 1
+        assert (0, len(sentence)) in span_to_index, span_to_index
+        tree = optimal_parser(label_log_probabilities_np,
+                              span_to_index,
+                              sentence_with_tags,
+                              self.empty_label_index,
+                              self.label_vocab)
+        return tree
 
     def _get_scores(self, sentence, is_train, elmo_embeddings):
         lstm_outputs = self._featurize_sentence(sentence, is_train=is_train,
@@ -301,10 +321,10 @@ class Parser(object):
         return label_log_probabilities, tag_log_probabilities, span_to_index
 
     def span_parser(self, sentence, is_train, elmo_embeddings, gold=None):
-        label_log_probabilities, tag_log_probabilities, span_to_index = self._get_scores(sentence, is_train, elmo_embeddings)
-        if gold is not None:
-            assert isinstance(gold, ParseNode)
         if is_train:
+            label_log_probabilities, tag_log_probabilities, span_to_index = self._get_scores(
+                sentence, is_train, elmo_embeddings)
+            assert isinstance(gold, ParseNode)
             total_loss = dy.zeros(1)
             span_to_gold_label = get_all_spans(gold)
             for span, oracle_label in span_to_gold_label.items():
@@ -316,36 +336,4 @@ class Parser(object):
                 total_loss -= label_log_probabilities[oracle_label_index][index]
             return total_loss
         else:
-            label_log_probabilities_np = label_log_probabilities.npvalue()
-            tag_log_probabilities_np = tag_log_probabilities.npvalue()
-            sentence_with_tags = []
-            num_correct = 0
-            total = 0
-            for word_index, (oracle_tag, word) in enumerate(sentence):
-                tag_index = np.argmax(tag_log_probabilities_np[:, word_index])
-                tag = self.tag_vocab.value(tag_index)
-                oracle_tag_is_deletable = oracle_tag in DELETABLE_TAGS
-                predicted_tag_is_deletable = tag in DELETABLE_TAGS
-                if oracle_tag is not None and oracle_tag not in self.tag_vocab.indices:
-                    print(oracle_tag, 'not in tag vocab')
-                    oracle_tag = None
-                if oracle_tag is not None:
-                    oracle_tag_index = self.tag_vocab.index(oracle_tag)
-                    if oracle_tag_index == tag_index and tag != oracle_tag:
-                        if oracle_tag[0] != '-':
-                            print(tag, oracle_tag)
-                        tag = oracle_tag
-                    num_correct += tag_index == oracle_tag_index
-
-                if oracle_tag is not None and oracle_tag_is_deletable != predicted_tag_is_deletable:
-                    sentence_with_tags.append((oracle_tag, word))
-                else:
-                    sentence_with_tags.append((tag, word))
-                total += 1
-            assert (0, len(sentence)) in span_to_index, span_to_index
-            tree = optimal_parser(label_log_probabilities_np,
-                                  span_to_index,
-                                  sentence_with_tags,
-                                  self.empty_label_index,
-                                  self.label_vocab)
-            return tree
+            return self.parse(sentence, elmo_embeddings)
