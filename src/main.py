@@ -423,7 +423,7 @@ def run_test_qbank(args):
     model = dy.ParameterCollection()
     [parser] = dy.load(args.model_path_base, model)
 
-    all_trees = trees.load_trees('questionbank/all_qb_trees.txt')
+    all_trees = trees.load_trees(args.question_bank_trees_path)
 
     if args.stanford_split == 'true':
         print('using stanford split')
@@ -832,11 +832,6 @@ def train_on_parses(args):
 
     wsj_train = load_parses('data/train.trees')
     parser, model = load_or_create_model(args, train_parses + wsj_train)
-    if args.load_components is not None:
-        print('populating params from', args.load_components)
-        # parser.f_tag.param_collection().populate(args.load_components, '/f-tag')
-        parser.f_encoding.param_collection().populate(args.load_components, '/f-encoding')
-        parser.lstm.param_collection().populate(args.load_components, '/lstm')
     assert parser.use_elmo
     trainer = dy.AdamTrainer(model)
 
@@ -980,7 +975,7 @@ def run_train_question_bank(args):
     if not os.path.exists(args.expt_name):
         os.mkdir(args.expt_name)
 
-    all_trees = trees.load_trees('questionbank/all_qb_trees.txt')
+    all_trees = trees.load_trees(args.question_bank_trees_path)
     all_parses = [tree.convert() for tree in all_trees]
 
 
@@ -1012,14 +1007,14 @@ def run_train_question_bank(args):
 
 
 
-    qb_embeddings_file = h5py.File('../question-bank.hdf5', 'r')
+    qb_embeddings_file = h5py.File(args.question_bank_elmo_embeddings_path, 'r')
 
 
 
 
     print("We have {:,} train trees.".format(len(stanford_train_indices)))
 
-    wsj_train = load_parses('data/train.trees')
+    wsj_train = load_parses(args.wsj_train_trees_path)
     qb_train_parses = [all_parses[index] for index in stanford_train_indices]
     qb_dev_treebank = [all_trees[index] for index in stanford_dev_indices]
     parser, model = load_or_create_model(args, qb_train_parses + wsj_train)
@@ -1036,7 +1031,7 @@ def run_train_question_bank(args):
 
     if args.train_on_wsj == 'true':
         print('training on wsj')
-        wsj_embeddings_file = h5py.File('../wsj-train.hdf5', 'r')
+        wsj_embeddings_file = h5py.File(args.wsj_train_elmo_embeddings_path, 'r')
         wsj_indices = list(range(39832))
     else:
         print('not training on wsj')
@@ -1456,33 +1451,34 @@ def main():
     subparser.add_argument("--model-path-base", required=True)
     subparser.add_argument("--expt-name", required=True)
 
-    subparser = subparsers.add_parser("train-question-bank")
-    subparser.set_defaults(callback=run_train_question_bank)
-    for arg in dynet_args:
-        subparser.add_argument(arg)
-    subparser.add_argument("--tag-embedding-dim", type=int, default=50)
-    subparser.add_argument("--word-embedding-dim", type=int, default=100)
-    subparser.add_argument("--lstm-layers", type=int, default=2)
-    subparser.add_argument("--lstm-dim", type=int, default=250)
-    subparser.add_argument("--label-hidden-dim", type=int, default=250)
-    subparser.add_argument("--split-hidden-dim", type=int, default=250)
-    subparser.add_argument("--dropout", type=float, default=0.4)
-    subparser.add_argument("--model-path-base", required=True)
-    subparser.add_argument("--evalb-dir", default="EVALB/")
-    subparser.add_argument("--batch-size", type=int, default=100)
-    subparser.add_argument("--expt-name", required=True)
 
-    subparser = subparsers.add_parser("train-question-bank-stanford-split")
+    subparser = subparsers.add_parser("train-on-question-bank")
     subparser.set_defaults(callback=run_train_question_bank)
     for arg in dynet_args:
         subparser.add_argument(arg)
 
-    subparser.add_argument("--load-components", default=None)
-    subparser.add_argument("--train-on-wsj", required=True)
-    # subparser.add_argument("--resample", required=True)
-    subparser.add_argument("--num-samples", required=True)
-    subparser.add_argument("--expt-name", required=True)
-    subparser.add_argument("--model-path-base", required=True)
+    subparser.add_argument("--train-on-wsj", required=True,
+                           description='Whether or not to train on the WSJ corpus. '
+                                       'Must be either true or false.')
+    subparser.add_argument("--num-samples",
+                           required=True,
+                           description='Number of sentences to train on from Question Bank.')
+
+    subparser.add_argument("--expt-name",
+                           required=True,
+                           description='The name of the experiment. '
+                                       'All results will be stored under this directory.')
+    subparser.add_argument("--model-path-base",
+                           required=True,
+                           description='Path prefix with which to save the model.')
+    subparser.add_argument("--question-bank-trees-path",
+                           default='questionbank/all_qb_trees.txt')
+    subparser.add_argument("--question-bank-elmo-embeddings-path",
+                           default='../question-bank.hdf5')
+    subparser.add_argument("--wsj-train-trees-path",
+                           default='data/train.trees')
+    subparser.add_argument("--wsj-train-elmo-embeddings-path",
+                           default='../wsj-train.hdf5')
     subparser.add_argument("--tag-embedding-dim", type=int, default=50)
     subparser.add_argument("--word-embedding-dim", type=int, default=100)
     subparser.add_argument("--lstm-layers", type=int, default=2)
@@ -1492,6 +1488,20 @@ def main():
     subparser.add_argument("--dropout", type=float, default=0.4)
     subparser.add_argument("--evalb-dir", default="EVALB/")
     subparser.add_argument("--batch-size", type=int, default=10)
+
+    subparser = subparsers.add_parser("test-on-question-bank")
+    subparser.set_defaults(callback=run_test_qbank)
+    for arg in dynet_args:
+        subparser.add_argument(arg)
+    subparser.add_argument("--stanford-split", required=True)
+    subparser.add_argument("--model-path-base", required=True)
+    subparser.add_argument("--question-bank-trees-path",
+                           default='questionbank/all_qb_trees.txt')
+    subparser.add_argument("--question-bank-elmo-embeddings-path",
+                           default='../question-bank.hdf5')
+    subparser.add_argument("--evalb-dir", default="EVALB/")
+    subparser.add_argument("--split", required=True)
+    subparser.add_argument("--expt-name", required=True)
 
 
 
@@ -1533,16 +1543,6 @@ def main():
     subparser.add_argument("--model-path-base", required=True)
     subparser.add_argument("--evalb-dir", default="EVALB/")
     subparser.add_argument("--test-path", required=True)
-    subparser.add_argument("--expt-name", required=True)
-
-    subparser = subparsers.add_parser("test-qb")
-    subparser.set_defaults(callback=run_test_qbank)
-    for arg in dynet_args:
-        subparser.add_argument(arg)
-    subparser.add_argument("--stanford-split", required=True)
-    subparser.add_argument("--model-path-base", required=True)
-    subparser.add_argument("--evalb-dir", default="EVALB/")
-    subparser.add_argument("--split", required=True)
     subparser.add_argument("--expt-name", required=True)
 
     args = parser.parse_args()
