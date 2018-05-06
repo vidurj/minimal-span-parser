@@ -1458,19 +1458,19 @@ def main():
         subparser.add_argument(arg)
 
     subparser.add_argument("--train-on-wsj", required=True,
-                           description='Whether or not to train on the WSJ corpus. '
+                           help='Whether or not to train on the WSJ corpus. '
                                        'Must be either true or false.')
     subparser.add_argument("--num-samples",
                            required=True,
-                           description='Number of sentences to train on from Question Bank.')
+                           help='Number of sentences to train on from Question Bank.')
 
     subparser.add_argument("--expt-name",
                            required=True,
-                           description='The name of the experiment. '
+                           help='The name of the experiment. '
                                        'All results will be stored under this directory.')
     subparser.add_argument("--model-path-base",
                            required=True,
-                           description='Path prefix with which to save the model.')
+                           help='Path prefix with which to save the model.')
     subparser.add_argument("--question-bank-trees-path",
                            default='questionbank/all_qb_trees.txt')
     subparser.add_argument("--question-bank-elmo-embeddings-path",
