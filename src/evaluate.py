@@ -16,7 +16,14 @@ class FScore(object):
             self.recall, self.precision, self.fscore)
 
 
-def evalb(evalb_dir, gold_trees, predicted_trees, name, args, erase_labels=False, flatten=False, expt_name=None):
+def evalb(evalb_dir,
+          gold_trees,
+          predicted_trees,
+          name,
+          args,
+          erase_labels=False,
+          flatten=False,
+          expt_name=None):
     if expt_name is None:
         expt_name = args.expt_name
     assert os.path.exists(evalb_dir)
@@ -29,13 +36,12 @@ def evalb(evalb_dir, gold_trees, predicted_trees, name, args, erase_labels=False
     for gold_tree, predicted_tree in zip(gold_trees, predicted_trees):
         assert isinstance(gold_tree, trees.TreebankNode)
         assert isinstance(predicted_tree, trees.TreebankNode)
-        # TODO reenable these!
-        # gold_leaves = list(gold_tree.leaves)
-        # predicted_leaves = list(predicted_tree.leaves)
-        # assert len(gold_leaves) == len(predicted_leaves)
-        # assert all(
-        #     gold_leaf.word == predicted_leaf.word
-        #     for gold_leaf, predicted_leaf in zip(gold_leaves, predicted_leaves))
+        gold_leaves = list(gold_tree.leaves)
+        predicted_leaves = list(predicted_tree.leaves)
+        assert len(gold_leaves) == len(predicted_leaves)
+        assert all(
+            gold_leaf.word == predicted_leaf.word
+            for gold_leaf, predicted_leaf in zip(gold_leaves, predicted_leaves))
 
     if not os.path.exists(expt_name):
         os.mkdir(expt_name)
