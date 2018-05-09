@@ -1083,6 +1083,7 @@ def main():
         subparser.add_argument(arg)
     subparser.set_defaults(callback=train_on_parses)
     subparser.add_argument("--expt-name", required=True)
+    subparser.add_argument("--no-elmo", action="store_true")
     subparser.add_argument("--num-epochs-per-check", default=1)
 
     subparser.add_argument("--numpy-seed", type=int)
