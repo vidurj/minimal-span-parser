@@ -623,7 +623,7 @@ def train_on_parses(args):
     else:
         train_embeddings = None
 
-    dev_trees = trees.load_trees(os.path.join(args.expt_name, 'dev.trees'))
+    dev_trees = trees.load_trees(os.path.join(args.expt_name, 'dev_trees.txt'))
 
     if not args.no_elmo:
         dev_tokenized_lines = parse_trees_to_string_lines(dev_trees)
@@ -635,7 +635,7 @@ def train_on_parses(args):
 
     additional_trees_path = os.path.join(args.expt_name, 'additional_trees.txt')
     if os.path.exists(additional_trees_path):
-        print('training on', additional_trees_path)
+        print('Training on', additional_trees_path)
         additional_train_trees = load_parses(additional_trees_path)
         additional_trees_indices = list(range(len(additional_train_trees)))
 
@@ -646,6 +646,7 @@ def train_on_parses(args):
                                                                               'additional_embeddings'),
                                                                  args.path_to_python)
     else:
+        print('No additional training trees.')
         additional_train_trees = []
         additional_trees_indices = []
 
