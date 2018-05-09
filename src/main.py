@@ -17,13 +17,12 @@ import trees
 import vocabulary
 from trees import InternalParseNode, LeafParseNode, ParseNode
 
-
 label_nt = namedtuple("label", ["left", "right", "oracle_label_index"])
+
 
 def check_overlap(span_a, span_b):
     return span_a[0] < span_b[0] < span_a[1] < span_b[1] or \
            span_b[0] < span_a[0] < span_b[1] < span_a[1]
-
 
 
 def format_elapsed(start_time):
@@ -35,7 +34,6 @@ def format_elapsed(start_time):
     if days > 0:
         elapsed_string = "{}d{}".format(days, elapsed_string)
     return elapsed_string
-
 
 
 def get_all_spans(parse):
@@ -128,7 +126,8 @@ def load_or_create_model(args, parses_for_vocab):
             args.lstm_dim,
             args.label_hidden_dim,
             None,
-            args.dropout
+            args.dropout,
+            not args.no_elmo
         )
     return parser, model
 
@@ -138,196 +137,6 @@ def load_parses(file_path):
     treebank = trees.load_trees(file_path)
     parses = [tree.convert() for tree in treebank]
     return parses
-
-
-def run_train_on_wsj(args):
-    return_code = os.system('cp -r src {}/'.format(args.expt_name))
-    assert return_code == 0
-    if args.numpy_seed is not None:
-        print("Setting numpy random seed to {}...".format(args.numpy_seed))
-        np.random.seed(args.numpy_seed)
-
-    all_parses = load_parses(args.train_path)
-
-    with open(os.path.join(args.expt_name, "train_tree_indices.txt"), 'r') as f:
-        train_tree_indices = [int(x) for x in f.read().strip().splitlines()]
-    assert max(train_tree_indices) < len(all_parses)
-    print('training on', len(train_tree_indices), 'full trees')
-
-    parser, model = load_or_create_model(args, all_parses)
-    assert parser.use_elmo != args.no_elmo
-
-    print("Loaded {:,} training examples.".format(len(train_tree_indices)))
-
-    print("Loading development trees from {}...".format(args.dev_path))
-    dev_treebank = trees.load_trees(args.dev_path)
-    print("Loaded {:,} development examples.".format(len(dev_treebank)))
-
-    print("Processing trees for training...")
-
-    trainer = dy.AdamTrainer(model)
-
-    total_processed = 0
-    current_processed = 0
-    best_dev_fscore = -np.inf
-    best_dev_model_path = None
-
-    start_time = time.time()
-
-    span_to_entropy = {}
-
-    dev_sentence_embeddings = h5py.File('../wsj-dev.hdf5', 'r')
-
-    def check_dev():
-        nonlocal best_dev_fscore
-        nonlocal best_dev_model_path
-
-        dev_start_time = time.time()
-
-        dev_predicted = []
-        # total_loglikelihood = 0
-        matrices = []
-        fill_span_to_entropy = len(span_to_entropy) == 0
-        num_correct = 0
-        total = 0
-        for sentence_number, tree in enumerate(dev_treebank):
-            if sentence_number % 100 == 0:
-                dy.renew_cg()
-            sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-            elmo_embeddings_np = dev_sentence_embeddings[str(sentence_number)][:, :, :]
-            assert elmo_embeddings_np.shape[1] == len(sentence)
-            elmo_embeddings = dy.inputTensor(elmo_embeddings_np)
-            predicted, (_, c, t) = parser.span_parser(sentence, is_train=False, elmo_embeddings=elmo_embeddings)
-            num_correct += c
-            total += t
-
-            dev_predicted.append(predicted.convert())
-
-        print('pos accuracy', num_correct / float(total + 1))
-
-        if args.erase_labels:
-            dev_fscore_without_labels = evaluate.evalb(args.evalb_dir, dev_treebank, dev_predicted,
-                                                       args=args,
-                                                       erase_labels=True,
-                                                       name="dev-without-labels")
-            print("dev-fscore without labels", dev_fscore_without_labels)
-
-        dev_fscore = evaluate.evalb(args.evalb_dir, dev_treebank, dev_predicted, args=args,
-                                    name="dev-regular")
-
-        print(
-            "dev-fscore {} "
-            "dev-elapsed {} "
-            "total-elapsed {}".format(
-                dev_fscore,
-                format_elapsed(dev_start_time),
-                format_elapsed(start_time),
-            )
-        )
-
-        if dev_fscore.fscore > best_dev_fscore:
-            if best_dev_model_path is not None:
-                for ext in [".data", ".meta"]:
-                    path = best_dev_model_path + ext
-                    if os.path.exists(path):
-                        print("Removing previous model file {}...".format(path))
-                        os.remove(path)
-
-            best_dev_fscore = dev_fscore.fscore
-            best_dev_model_path = "{}_dev={:.2f}".format(
-                args.model_path_base, dev_fscore.fscore)
-            print("Saving new best model to {}...".format(best_dev_model_path))
-            dy.save(best_dev_model_path, [parser])
-            return True, dev_fscore
-        else:
-            latest_model_path = "{}_latest_model".format(args.model_path_base, dev_fscore.fscore)
-            for ext in [".data", ".meta"]:
-                path = latest_model_path + ext
-                if os.path.exists(path):
-                    print("Removing previous model file {}...".format(path))
-                    os.remove(path)
-
-            print("Saving new model to {}...".format(latest_model_path))
-            dy.save(latest_model_path, [parser])
-            return False, dev_fscore
-
-    total_batch_loss = prev_total_batch_loss = None
-
-    return_code = os.system('echo "test"')
-    assert return_code == 0
-    train_sentence_embeddings = h5py.File('../wsj-train.hdf5', 'r')
-    for epoch in itertools.count(start=1):
-        if args.epochs is not None and epoch > args.epochs:
-            break
-
-        if epoch > 1:
-            save_latest_model(args.model_path_base, parser)
-            is_best, dev_score = check_dev()
-        else:
-            is_best = True
-            dev_score = None
-
-        if dev_score is not None:
-            perf_summary = '\n' + '-' * 40 + '\n' + str(dev_score) + '\n'
-            with open("performance.txt", "a+") as f:
-                f.write(perf_summary)
-            return_code = os.system("date >> performance.txt")
-            assert return_code == 0
-            span_labels_path = os.path.join(args.expt_name, "span_labels.txt")
-            if os.path.exists(span_labels_path):
-                return_code = os.system(
-                    "wc -l {} >> performance.txt".format(span_labels_path))
-                assert return_code == 0
-
-        print("Total batch loss", total_batch_loss, "Prev batch loss", prev_total_batch_loss)
-        prev_total_batch_loss = total_batch_loss
-        epoch_start_time = time.time()
-        num_batches = 0
-        total_batch_loss = 0
-        np.random.shuffle(train_tree_indices)
-        for start_tree_index in range(0, len(train_tree_indices), args.batch_size):
-            dy.renew_cg()
-            batch_losses = []
-            for offset in range(args.batch_size):
-                if start_tree_index + offset < len(train_tree_indices):
-                    sentence_number = train_tree_indices[start_tree_index + offset]
-                    gold = all_parses[sentence_number]
-                    sentence = [(leaf.tag, leaf.word) for leaf in gold.leaves]
-                    if not args.no_elmo:
-                        elmo_embeddings_np = train_sentence_embeddings[str(sentence_number)][:, :, :]
-                        assert elmo_embeddings_np.shape[1] == len(sentence), (len(sentence), elmo_embeddings_np.shape)
-                        elmo_embeddings = dy.inputTensor(elmo_embeddings_np)
-                    else:
-                        elmo_embeddings = None
-                    loss = parser.span_parser(sentence, is_train=True, elmo_embeddings=elmo_embeddings, gold=gold)
-                    batch_losses.append(loss)
-                    total_processed += 1
-                    current_processed += 1
-
-            if len(batch_losses) > 0:
-                batch_loss = dy.average(batch_losses)
-                batch_loss.backward()
-                trainer.update()
-                batch_loss_value = batch_loss.scalar_value()
-                total_batch_loss += batch_loss_value
-                num_batches += 1
-
-                print(
-                    "epoch {:,} "
-                    "batch {:,}/{:,} "
-                    "processed {:,} "
-                    "batch-loss {:.4f} "
-                    "epoch-elapsed {} "
-                    "total-elapsed {}".format(
-                        epoch,
-                        num_batches,
-                        len(all_parses) / args.batch_size,
-                        total_processed,
-                        batch_loss_value,
-                        format_elapsed(epoch_start_time),
-                        format_elapsed(start_time),
-                    )
-                )
 
 
 def evaluate_on_brown_corpus(args):
@@ -351,7 +160,8 @@ def evaluate_on_brown_corpus(args):
         sentences = [[(leaf.tag, leaf.word) for leaf in tree.leaves] for tree in treebank]
         tokenized_lines = [' '.join([word for pos, word in sentence]) for sentence in sentences]
         if args.use_elmo:
-            embedding_file = compute_elmo_embeddings(tokenized_lines, expt_name, args.path_to_python)
+            embedding_file = compute_elmo_embeddings(tokenized_lines, expt_name,
+                                                     args.path_to_python)
         else:
             embedding_file = None
         dev_predicted = []
@@ -364,12 +174,13 @@ def evaluate_on_brown_corpus(args):
             sentence = sentences[tree_index]
             if args.use_elmo:
                 embeddings_np = embedding_file[str(tree_index)][:, :, :]
-                assert embeddings_np.shape[1] == len(sentence), (embeddings_np.shape[1], len(sentence))
+                assert embeddings_np.shape[1] == len(sentence), (
+                embeddings_np.shape[1], len(sentence))
                 embeddings = dy.inputTensor(embeddings_np)
             else:
                 embeddings = None
             predicted, (additional_info, c, t) = parser.span_parser(sentence, is_train=False,
-                                              elmo_embeddings=embeddings)
+                                                                    elmo_embeddings=embeddings)
             num_correct += c
             total += t
             dev_predicted.append(predicted.convert())
@@ -399,7 +210,7 @@ def evaluate_on_brown_corpus(args):
 
         test_fscore = evaluate.evalb('EVALB/', treebank, dev_predicted, args=args,
                                      name="regular",
-                                                   expt_name=expt_name)
+                                     expt_name=expt_name)
 
         print("regular", test_fscore)
         pos_fraction = num_correct / total
@@ -445,7 +256,7 @@ def run_test_qbank(args):
         assert test_embeddings_np.shape[1] == len(sentence)
         test_embeddings = dy.inputTensor(test_embeddings_np)
         predicted, _ = parser.span_parser(sentence, is_train=False,
-                                             elmo_embeddings=test_embeddings)
+                                          elmo_embeddings=test_embeddings)
         dev_predicted.append(predicted.convert())
 
     test_treebank = [all_trees[index] for index in test_indices]
@@ -571,8 +382,8 @@ def test_on_brackets(args):
     model = dy.ParameterCollection()
     [parser] = dy.load(args.model_path_base, model)
     embedding_file = compute_elmo_embeddings(processed_lines,
-                                        args.expt_name + '/test',
-                                        args.path_to_python)
+                                             args.expt_name + '/test',
+                                             args.path_to_python)
     sentences = [[(None, word) for word in line.split()] for line in processed_lines]
     num_correct = 0
     num_correct_original = 0
@@ -585,7 +396,7 @@ def test_on_brackets(args):
         assert elmo_embeddings_np.shape[1] == len(sentence)
         elmo_embeddings = dy.inputTensor(elmo_embeddings_np)
         lstm_outputs = parser._featurize_sentence(sentence, is_train=False,
-                                                elmo_embeddings=elmo_embeddings)
+                                                  elmo_embeddings=elmo_embeddings)
         encodings = []
         span_to_index = {}
         for ((start, end), is_constituent) in sentence_number_to_bracketings[sentence_number]:
@@ -596,17 +407,18 @@ def test_on_brackets(args):
             print('skipping sentence', sentence_number)
             continue
 
-        label_scores = parser.f_label(dy.rectify(parser.f_encoding(dy.concatenate_to_batch(encodings))))
+        label_scores = parser.f_label(
+            dy.rectify(parser.f_encoding(dy.concatenate_to_batch(encodings))))
         label_scores_reshaped = dy.reshape(label_scores,
                                            (parser.label_vocab.size, len(encodings)))
         label_probabilities = dy.softmax(label_scores_reshaped)
-
 
         is_perfect = True
         sentence_words = [word for pos, word in sentence]
         for (span, is_constituent) in sentence_number_to_bracketings[sentence_number]:
             span_index = span_to_index[span]
-            non_constituent_prob_np = label_probabilities[parser.empty_label_index][span_index].scalar_value()
+            non_constituent_prob_np = label_probabilities[parser.empty_label_index][
+                span_index].scalar_value()
             if is_constituent and non_constituent_prob_np < 0.5:
                 num_correct += 1
                 if (sentence_number, span) in original_brackets:
@@ -616,7 +428,8 @@ def test_on_brackets(args):
                 if (sentence_number, span) in original_brackets:
                     num_correct_original += 1
             else:
-                print(is_constituent, non_constituent_prob_np, ' '.join(sentence_words[span[0]: span[1]]))
+                print(is_constituent, non_constituent_prob_np,
+                      ' '.join(sentence_words[span[0]: span[1]]))
                 is_perfect = False
                 num_wrong += 1
 
@@ -629,17 +442,21 @@ def test_on_brackets(args):
         num_perfect_sentences += is_perfect
         num_sentences += 1
 
-
-
-    print('fraction of original correct spans', num_correct_original, len(original_brackets), num_correct_original / float(len(original_brackets)))
+    print('fraction of original correct spans', num_correct_original, len(original_brackets),
+          num_correct_original / float(len(original_brackets)))
     print('accuracy', num_correct / float(num_correct + num_wrong), num_correct, num_wrong)
-    print('num sentences', num_sentences, 'num perfect sentences', num_perfect_sentences, 'fraction', num_perfect_sentences / float(num_sentences))
-    results = str(args) + '\n' + str(('accuracy', num_correct / float(num_correct + num_wrong), num_correct, num_wrong)) + \
-              str(('num sentences', num_sentences, 'num perfect sentences', num_perfect_sentences, 'fraction', num_perfect_sentences / float(num_sentences)))
+    print(
+    'num sentences', num_sentences, 'num perfect sentences', num_perfect_sentences, 'fraction',
+    num_perfect_sentences / float(num_sentences))
+    results = str(args) + '\n' + str(
+        ('accuracy', num_correct / float(num_correct + num_wrong), num_correct, num_wrong)) + \
+              str(('num sentences', num_sentences, 'num perfect sentences', num_perfect_sentences,
+                   'fraction', num_perfect_sentences / float(num_sentences)))
     with open(args.expt_name + '/trained_test_results.txt', 'w') as f:
         f.write(results)
     with open(args.expt_name + '/parses.txt', 'w') as f:
         f.write(output_string)
+
 
 def train_on_brackets(args):
     if not os.path.exists(args.expt_name):
@@ -682,7 +499,8 @@ def train_on_brackets(args):
         assert len(open_bracket_indices) == 0, open_bracket_indices
         processed_lines.append(' '.join(sentence))
         stripped_tokens = [x for x in tokens if x != '[' and x != ']' and x != '{' and x != '}']
-        assert processed_lines[-1].split() == stripped_tokens, (processed_lines[-1].split(), stripped_tokens)
+        assert processed_lines[-1].split() == stripped_tokens, (
+        processed_lines[-1].split(), stripped_tokens)
 
     wsj_train = load_parses(args.wsj_train_trees_path)
     parser, model = load_or_create_model(args, wsj_train)
@@ -695,7 +513,6 @@ def train_on_brackets(args):
     for epoch in itertools.count(start=1):
         dy.renew_cg()
 
-
         loss = dy.zeros(1)
         num_correct = 0
         num_wrong = 0
@@ -706,7 +523,7 @@ def train_on_brackets(args):
             assert elmo_embeddings_np.shape[1] == len(sentence)
             elmo_embeddings = dy.inputTensor(elmo_embeddings_np)
             lstm_outputs = parser._featurize_sentence(sentence, is_train=True,
-                                                    elmo_embeddings=elmo_embeddings)
+                                                      elmo_embeddings=elmo_embeddings)
             encodings = []
             span_to_index = {}
             for ((start, end), is_constituent) in sentence_number_to_bracketings[sentence_index]:
@@ -717,27 +534,28 @@ def train_on_brackets(args):
                 print('skipping sentence')
                 continue
 
-            label_scores = parser.f_label(dy.rectify(parser.f_encoding(dy.concatenate_to_batch(encodings))))
+            label_scores = parser.f_label(
+                dy.rectify(parser.f_encoding(dy.concatenate_to_batch(encodings))))
             label_scores_reshaped = dy.reshape(label_scores,
                                                (parser.label_vocab.size, len(encodings)))
             label_probabilities = dy.softmax(label_scores_reshaped)
 
-
-
             for (span, is_constituent) in sentence_number_to_bracketings[sentence_index]:
                 span_index = span_to_index[span]
-                non_constituent_prob_np = label_probabilities[parser.empty_label_index][span_index].scalar_value()
+                non_constituent_prob_np = label_probabilities[parser.empty_label_index][
+                    span_index].scalar_value()
                 if is_constituent:
-                    loss -= dy.log(1 - label_probabilities[parser.empty_label_index][span_index] + 10 ** -7)
+                    loss -= dy.log(
+                        1 - label_probabilities[parser.empty_label_index][span_index] + 10 ** -7)
                 else:
-                    loss -= dy.log(label_probabilities[parser.empty_label_index][span_index] + 10 ** -7)
+                    loss -= dy.log(
+                        label_probabilities[parser.empty_label_index][span_index] + 10 ** -7)
                 if is_constituent and non_constituent_prob_np < 0.5:
                     num_correct += 1
                 elif not is_constituent and non_constituent_prob_np > 0.5:
                     num_correct += 1
                 else:
                     num_wrong += 1
-
 
         print(loss.scalar_value())
         print('batch number', epoch)
@@ -757,9 +575,8 @@ def train_on_brackets(args):
             assert wsj_embeddings_np.shape[1] == len(sentence)
             wsj_embeddings = dy.inputTensor(wsj_embeddings_np)
             loss = parser.span_parser(sentence, is_train=True, gold=tree,
-                                         elmo_embeddings=wsj_embeddings)
+                                      elmo_embeddings=wsj_embeddings)
             batch_losses.append(loss)
-
 
         batch_loss = dy.average(batch_losses)
         batch_loss_value = batch_loss.scalar_value()
@@ -785,43 +602,53 @@ def save_latest_model(model_path_base, parser):
     dy.save(latest_model_path, [parser])
 
 
+def parse_trees_to_string_lines(trees):
+    tokenized_lines = []
+    for tree in trees:
+        sentence = [leaf.word for leaf in tree.leaves]
+        tokenized_lines.append(' '.join(sentence))
+    return tokenized_lines
+
+
 def train_on_parses(args):
-    print(args.expt_name)
-    if not os.path.exists(args.expt_name):
-        os.mkdir(args.expt_name)
+    train_parses = load_parses(os.path.join(args.expt_name, 'train_trees.txt'))
+    train_indices = list(range(len(train_parses)))
+    if not args.no_elmo:
+        train_tokenized_lines = parse_trees_to_string_lines(train_parses)
+        train_embeddings = compute_elmo_embeddings(train_tokenized_lines,
+                                                   os.path.join(args.expt_name,
+                                                                'train_embeddings'),
+                                                   args.path_to_python)
     else:
-        print("directory exists")
-    train_parses = load_parses(args.embedding_path + '/train.trees')
-    train_tokenized_lines = []
-    for parse in train_parses:
-        sentence = [leaf.word for leaf in parse.leaves]
-        train_tokenized_lines.append(' '.join(sentence))
-    train_embeddings = compute_elmo_embeddings(train_tokenized_lines,
-                                          args.embedding_path + '/train_embeddings',
-                                               args.path_to_python)
+        train_embeddings = None
 
-    dev_trees = trees.load_trees(args.embedding_path + '/dev.trees')
-    dev_tokenized_lines = []
-    for tree in dev_trees:
-        sentence = [leaf.word for leaf in tree.leaves]
-        dev_tokenized_lines.append(' '.join(sentence))
-    dev_embeddings = compute_elmo_embeddings(dev_tokenized_lines,
-                                        args.embedding_path + '/dev_embeddings',
-                                             args.path_to_python)
+    dev_trees = trees.load_trees(os.path.join(args.expt_name, 'dev.trees'))
 
-    test_trees = trees.load_trees(args.embedding_path + '/test.trees')
-    test_tokenized_lines = []
-    for tree in test_trees:
-        sentence = [leaf.word for leaf in tree.leaves]
-        test_tokenized_lines.append(' '.join(sentence))
-    compute_elmo_embeddings(test_tokenized_lines,
-                                        args.embedding_path + '/test_embeddings',
-                            args.path_to_python)
+    if not args.no_elmo:
+        dev_tokenized_lines = parse_trees_to_string_lines(dev_trees)
+        dev_embeddings = compute_elmo_embeddings(dev_tokenized_lines,
+                                                 os.path.join(args.expt_name, 'dev_embeddings'),
+                                                 args.path_to_python)
+    else:
+        dev_embeddings = None
 
+    additional_trees_path = os.path.join(args.expt_name, 'additional_trees.txt')
+    if os.path.exists(additional_trees_path):
+        print('training on', additional_trees_path)
+        additional_train_trees = load_parses(additional_trees_path)
+        additional_trees_indices = list(range(len(additional_train_trees)))
 
-    wsj_train = load_parses('data/train.trees')
-    parser, model = load_or_create_model(args, train_parses + wsj_train)
-    assert parser.use_elmo
+        if not args.no_elmo:
+            additional_tokenized_lines = parse_trees_to_string_lines(additional_train_trees)
+            additional_embeddings_file = compute_elmo_embeddings(additional_tokenized_lines,
+                                                                 os.path.join(args.expt_name,
+                                                                              'additional_embeddings'),
+                                                                 args.path_to_python)
+    else:
+        additional_train_trees = []
+        additional_trees_indices = []
+
+    parser, model = load_or_create_model(args, train_parses + additional_train_trees)
     trainer = dy.AdamTrainer(model)
 
     total_processed = 0
@@ -830,80 +657,6 @@ def train_on_parses(args):
     best_dev_model_path = None
 
     start_time = time.time()
-
-
-    def check_dev():
-        nonlocal best_dev_fscore
-        nonlocal best_dev_model_path
-
-        dev_start_time = time.time()
-
-        dev_predicted = []
-        for index, tree in enumerate(dev_trees):
-            if len(dev_predicted) % 100 == 0:
-                dy.renew_cg()
-
-            sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-            embeddings_np = dev_embeddings[str(index)][:, :, :]
-            assert embeddings_np.shape[1] == len(sentence)
-            embeddings = dy.inputTensor(embeddings_np)
-            predicted, _ = parser.span_parser(sentence, is_train=False, elmo_embeddings=embeddings)
-            dev_predicted.append(predicted.convert())
-
-        dev_fscore = evaluate.evalb(args.evalb_dir, dev_trees, dev_predicted, args=args,
-                                    name="dev")
-
-        print(
-            "dev-fscore {} "
-            "dev-elapsed {} "
-            "total-elapsed {}".format(
-                dev_fscore,
-                format_elapsed(dev_start_time),
-                format_elapsed(start_time),
-            )
-        )
-
-        if dev_fscore.fscore > best_dev_fscore:
-            if best_dev_model_path is not None:
-                for ext in [".data", ".meta"]:
-                    path = best_dev_model_path + ext
-                    if os.path.exists(path):
-                        print("Removing previous model file {}...".format(path))
-                        os.remove(path)
-
-            best_dev_fscore = dev_fscore.fscore
-            best_dev_model_path = "{}_dev={:.2f}".format(
-                args.model_path_base, dev_fscore.fscore)
-            print("Saving new best model to {}...".format(best_dev_model_path))
-            dy.save(best_dev_model_path, [parser])
-
-    if args.train_on_wsj == 'true':
-        print('training on wsj')
-        wsj_embeddings_file = h5py.File('../wsj-train.hdf5', 'r')
-        wsj_indices = list(range(39832))
-    else:
-        print('not training on wsj')
-
-    indices_file_path = args.expt_name + '/train_tree_indices.txt'
-    if os.path.exists(indices_file_path):
-        with open(indices_file_path, 'r') as f:
-            train_indices = [int(x) for x in f.read().splitlines()]
-        print('loaded', len(train_indices), 'indices from file', indices_file_path)
-    elif args.num_samples != 'false':
-        print('restricting to', args.num_samples, 'samples')
-        print('creating new data! ' * 100)
-        train_indices = list(range(len(train_parses)))
-        random.shuffle(train_indices)
-        train_indices = train_indices[:int(args.num_samples)]
-    else:
-        print('training on original data')
-        train_indices = list(range(len(train_parses)))
-
-    with open(indices_file_path, 'w') as f:
-        f.write('\n'.join([str(x) for x in train_indices]))
-
-    if args.num_samples != 'false':
-        assert int(args.num_samples) == len(train_indices), (args.num_samples, len(train_indices))
 
     for epoch in itertools.count(start=1):
         np.random.shuffle(train_indices)
@@ -916,23 +669,33 @@ def train_on_parses(args):
             for tree_index in train_indices[start_index: start_index + args.batch_size]:
                 tree = train_parses[tree_index]
                 sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-                embeddings_np = train_embeddings[str(tree_index)][:, :, :]
-                assert embeddings_np.shape[1] == len(sentence), (embeddings_np.shape, len(sentence), sentence)
-                embeddings = dy.inputTensor(embeddings_np)
-                loss = parser.span_parser(sentence, is_train=True, gold=tree, elmo_embeddings=embeddings)
+                if train_embeddings is not None:
+                    embeddings_np = train_embeddings[str(tree_index)][:, :, :]
+                    assert embeddings_np.shape[1] == len(sentence), (
+                    embeddings_np.shape, len(sentence), sentence)
+                    embeddings = dy.inputTensor(embeddings_np)
+                else:
+                    embeddings = None
+                loss = parser.span_parser(sentence, is_train=True, gold=tree,
+                                          elmo_embeddings=embeddings)
                 batch_losses.append(loss)
                 total_processed += 1
                 current_processed += 1
 
-            if args.train_on_wsj == 'true':
-                random.shuffle(wsj_indices)
-                for tree_index in wsj_indices[:100]:
-                    tree = wsj_train[tree_index]
-                    sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
-                    embeddings = dy.inputTensor(wsj_embeddings_file[str(tree_index)][:, :, :])
-                    loss = parser.span_parser(sentence, is_train=True, gold=tree,
-                                                 elmo_embeddings=embeddings)
-                    batch_losses.append(loss)
+            random.shuffle(additional_trees_indices)
+            for tree_index in additional_trees_indices[:100]:
+                tree = additional_train_trees[tree_index]
+                sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
+                if additional_embeddings_file is not None:
+                    embeddings = dy.inputTensor(
+                        additional_embeddings_file[str(tree_index)][:, :, :])
+                else:
+                    embeddings = None
+                loss = parser.span_parser(sentence,
+                                          is_train=True,
+                                          gold=tree,
+                                          elmo_embeddings=embeddings)
+                batch_losses.append(loss)
 
             batch_loss = dy.average(batch_losses)
             batch_loss_value = batch_loss.scalar_value()
@@ -957,7 +720,12 @@ def train_on_parses(args):
             )
 
         if epoch % int(args.num_epochs_per_check) == 0:
-            check_dev()
+            check_performance_and_save(parser,
+                                       best_dev_fscore,
+                                       best_dev_model_path,
+                                       dev_trees,
+                                       dev_embeddings,
+                                       args)
 
 
 def run_train_question_bank(args):
@@ -967,13 +735,11 @@ def run_train_question_bank(args):
     all_trees = trees.load_trees(args.question_bank_trees_path)
     all_parses = [tree.convert() for tree in all_trees]
 
-
     print("Loaded {:,} trees.".format(len(all_parses)))
 
     tentative_stanford_train_indices = list(range(0, 1000)) + list(range(2000, 3000))
     stanford_dev_indices = list(range(1000, 1500)) + list(range(3000, 3500))
     stanford_test_indices = list(range(1500, 2000)) + list(range(3500, 4000))
-
 
     dev_and_test_sentences = set()
     for index in stanford_dev_indices:
@@ -986,7 +752,6 @@ def run_train_question_bank(args):
         sentence = [(leaf.tag, leaf.word) for leaf in parse.leaves]
         dev_and_test_sentences.add(tuple(sentence))
 
-
     stanford_train_indices = []
     for index in tentative_stanford_train_indices:
         parse = all_parses[index]
@@ -994,12 +759,7 @@ def run_train_question_bank(args):
         if tuple(sentence) not in dev_and_test_sentences:
             stanford_train_indices.append(index)
 
-
-
     qb_embeddings_file = h5py.File(args.question_bank_elmo_embeddings_path, 'r')
-
-
-
 
     print("We have {:,} train trees.".format(len(stanford_train_indices)))
 
@@ -1016,7 +776,6 @@ def run_train_question_bank(args):
     best_dev_model_path = None
 
     start_time = time.time()
-
 
     if args.train_on_wsj == 'true':
         print('training on wsj')
@@ -1038,7 +797,6 @@ def run_train_question_bank(args):
         print('training on original data')
         tree_indices = stanford_train_indices
 
-
     if args.num_samples != 'false':
         assert int(args.num_samples) == len(tree_indices), (args.num_samples, len(tree_indices))
 
@@ -1057,9 +815,11 @@ def run_train_question_bank(args):
                 tree = all_parses[tree_index]
                 sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
                 embeddings_np = qb_embeddings_file[str(tree_index)][:, :, :]
-                assert embeddings_np.shape[1] == len(sentence), (embeddings_np.shape, len(sentence), sentence)
+                assert embeddings_np.shape[1] == len(sentence), (
+                embeddings_np.shape, len(sentence), sentence)
                 embeddings = dy.inputTensor(embeddings_np)
-                loss = parser.span_parser(sentence, is_train=True, gold=tree, elmo_embeddings=embeddings)
+                loss = parser.span_parser(sentence, is_train=True, gold=tree,
+                                          elmo_embeddings=embeddings)
                 batch_losses.append(loss)
                 total_processed += 1
                 current_processed += 1
@@ -1071,7 +831,7 @@ def run_train_question_bank(args):
                     sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
                     embeddings = dy.inputTensor(wsj_embeddings_file[str(tree_index)][:, :, :])
                     loss = parser.span_parser(sentence, is_train=True, gold=tree,
-                                                 elmo_embeddings=embeddings)
+                                              elmo_embeddings=embeddings)
                     batch_losses.append(loss)
 
             batch_loss = dy.average(batch_losses)
@@ -1101,26 +861,25 @@ def run_train_question_bank(args):
                                        best_dev_fscore,
                                        best_dev_model_path,
                                        qb_dev_treebank,
-                                       stanford_dev_indices,
                                        qb_embeddings_file,
                                        args)
 
 
-
-
-def check_performance(parser, treebank, sentence_indices, sentence_embeddings, args):
+def check_performance(parser, treebank, sentence_embeddings, args):
     dev_start_time = time.time()
 
     dev_predicted = []
-    assert len(sentence_indices) == len(treebank), (len(sentence_indices), len(treebank))
-    for iteration_number, (tree_index, tree) in enumerate(zip(sentence_indices, treebank)):
-        if iteration_number % 100 == 0:
+    for tree_index, tree in enumerate(treebank):
+        if tree_index % 100 == 0:
             dy.renew_cg()
-        elmo_embeddings_np = sentence_embeddings[str(tree_index)][:, :, :]
+        if sentence_embeddings is not None:
+            elmo_embeddings = dy.inputTensor(sentence_embeddings[str(tree_index)][:, :, :])
+        else:
+            elmo_embeddings = None
         sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
         predicted = parser.span_parser(sentence,
                                        is_train=False,
-                                       elmo_embeddings=elmo_embeddings_np)
+                                       elmo_embeddings=elmo_embeddings)
         dev_predicted.append(predicted.convert())
 
     dev_fscore = evaluate.evalb('EVALB', treebank, dev_predicted, args=args, name="dev")
@@ -1128,16 +887,13 @@ def check_performance(parser, treebank, sentence_indices, sentence_embeddings, a
 
 
 def check_performance_and_save(parser,
-                                  best_dev_fscore,
-                                  best_dev_model_path,
-                                  treebank,
-                                  sentence_indices,
-                                  sentence_embeddings,
-                                  args):
-
+                               best_dev_fscore,
+                               best_dev_model_path,
+                               treebank,
+                               sentence_embeddings,
+                               args):
     dev_fscore, dev_start_time = check_performance(parser,
                                                    treebank,
-                                                   sentence_indices,
                                                    sentence_embeddings,
                                                    args)
 
@@ -1158,8 +914,6 @@ def check_performance_and_save(parser,
     return best_dev_fscore, best_dev_model_path
 
 
-
-
 # TODO support no elmo case
 def run_test(args):
     if not os.path.exists(args.expt_name):
@@ -1178,8 +932,6 @@ def run_test(args):
     check_performance(parser, test_treebank, range(len(test_treebank)), sentence_embeddings, args)
 
 
-
-
 def produce_parse_lists(args):
     if args.dev_parses:
         print('using dev')
@@ -1195,7 +947,7 @@ def produce_parse_lists(args):
 
 
 def produce_sentences_from_conll(args):
-    sentences  = ['']
+    sentences = ['']
     with open(args.input_file, 'r') as f:
         lines = f.read().strip().splitlines()
     for line in lines:
@@ -1247,7 +999,8 @@ def test_on_parses(args):
             dy.renew_cg()
         sentence = [(leaf.tag, leaf.word) for leaf in tree.leaves]
         elmo_embeddings_np = sentence_embeddings[str(tree_index)][:, :, :]
-        assert elmo_embeddings_np.shape[1] == len(sentence), (elmo_embeddings_np.shape[1], len(sentence), [word for pos, word in sentence])
+        assert elmo_embeddings_np.shape[1] == len(sentence), (
+        elmo_embeddings_np.shape[1], len(sentence), [word for pos, word in sentence])
         elmo_embeddings = dy.inputTensor(elmo_embeddings_np)
         predicted, (additional_info, c, t) = parser.span_parser(sentence, is_train=False,
                                                                 elmo_embeddings=elmo_embeddings)
@@ -1310,7 +1063,6 @@ def save_components(args):
     parser.lstm.param_collection().save(args.save_path, '/lstm', append=True)
 
 
-
 def main():
     dynet_args = [
         "--dynet-mem",
@@ -1325,7 +1077,6 @@ def main():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers()
 
-
     subparser = subparsers.add_parser("train-on-parses")
     for arg in dynet_args:
         subparser.add_argument(arg)
@@ -1333,18 +1084,16 @@ def main():
     subparser.add_argument("--expt-name", required=True)
     subparser.add_argument("--model-path-base", required=True)
     subparser.add_argument("--embedding-path", required=True)
-    subparser.add_argument("--load-components", default=None)
     subparser.add_argument("--num-samples", required=True)
-    subparser.add_argument("--train-on-wsj", required=True)
-    subparser.add_argument("--num-epochs-per-check", default=10)
+    subparser.add_argument("--additional-train-trees", default=None)
+    subparser.add_argument("--additional-train-trees-elmo-embeddings", default=None)
+    subparser.add_argument("--num-epochs-per-check", default=1)
 
     subparser.add_argument("--numpy-seed", type=int)
-    subparser.add_argument("--tag-embedding-dim", type=int, default=50)
     subparser.add_argument("--word-embedding-dim", type=int, default=100)
     subparser.add_argument("--lstm-layers", type=int, default=2)
     subparser.add_argument("--lstm-dim", type=int, default=250)
     subparser.add_argument("--label-hidden-dim", type=int, default=250)
-    subparser.add_argument("--split-hidden-dim", type=int, default=250)
     subparser.add_argument("--dropout", type=float, default=0.4)
     subparser.add_argument("--evalb-dir", default="EVALB/")
     subparser.add_argument("--batch-size", type=int, default=10)
@@ -1357,7 +1106,6 @@ def main():
     subparser.add_argument("--expt-name", required=True)
     subparser.add_argument("--elmo-embeddings-file-path", required=True)
     subparser.add_argument("--model-path-base", required=True)
-
 
     subparser = subparsers.add_parser("produce-elmo-for-treebank")
     subparser.set_defaults(callback=produce_elmo_for_treebank)
@@ -1378,7 +1126,6 @@ def main():
     subparser.set_defaults(callback=produce_sentences_from_conll)
     subparser.add_argument("--input-file", required=True)
     subparser.add_argument("--output-file", required=True)
-
 
     subparser = subparsers.add_parser("evaluate-brown-corpus")
     subparser.set_defaults(callback=evaluate_on_brown_corpus)
@@ -1417,7 +1164,6 @@ def main():
                            help='Path to python environment with Allennlp. '
                                 'Example: /home/user/miniconda3/envs/allennlp/bin/python3')
 
-
     subparser = subparsers.add_parser("train-on-question-bank")
     subparser.set_defaults(callback=run_train_question_bank)
     for arg in dynet_args:
@@ -1425,7 +1171,7 @@ def main():
 
     subparser.add_argument("--train-on-wsj", required=True,
                            help='Whether or not to train on the WSJ corpus. '
-                                       'Must be either "true" or "false".')
+                                'Must be either "true" or "false".')
     subparser.add_argument("--num-samples",
                            required=True,
                            help='Number of sentences to train on from Question Bank.')
@@ -1433,7 +1179,7 @@ def main():
     subparser.add_argument("--expt-name",
                            required=True,
                            help='The name of the experiment. '
-                                       'All results will be stored under this directory.')
+                                'All results will be stored under this directory.')
     subparser.add_argument("--model-path-base",
                            required=True,
                            help='Path prefix with which to save the model.')
@@ -1445,12 +1191,10 @@ def main():
                            default='data/train.trees')
     subparser.add_argument("--wsj-train-elmo-embeddings-path",
                            default='../wsj-train.hdf5')
-    subparser.add_argument("--tag-embedding-dim", type=int, default=50)
     subparser.add_argument("--word-embedding-dim", type=int, default=100)
     subparser.add_argument("--lstm-layers", type=int, default=2)
     subparser.add_argument("--lstm-dim", type=int, default=250)
     subparser.add_argument("--label-hidden-dim", type=int, default=250)
-    subparser.add_argument("--split-hidden-dim", type=int, default=250)
     subparser.add_argument("--dropout", type=float, default=0.4)
     subparser.add_argument("--evalb-dir", default="EVALB/")
     subparser.add_argument("--batch-size", type=int, default=10)
@@ -1473,8 +1217,6 @@ def main():
                            required=True,
                            help='Which split to test on. Must be "train", "dev" or "test".')
     subparser.add_argument("--expt-name", required=True)
-
-
 
     subparser = subparsers.add_parser("train")
     subparser.set_defaults(callback=run_train_on_wsj)

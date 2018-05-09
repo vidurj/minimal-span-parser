@@ -1,8 +1,7 @@
 # Extending a Parser to Distant Domains
 
 This repository contains the code used to generate the results described in [Extending a Parser to Distant Domains Using a Few Dozen Partially Annotated Examples](TODO) from ACL 2018, forked from the [Minimal Span Parser](https://github.com/mitchellstern/minimal-span-parser) repository.
-
-
+An more user friendly implementation of the parser is available in PyTorch through [AllenNLP](https://github.com/allenai/allennlp) and a demo here http://demo.allennlp.org/constituency-parsing.
 ## Requirements and Setup
 
 * Python 3.5 or higher.
@@ -18,11 +17,9 @@ A new model can be trained using the command `python3 src/main.py train ...` wit
 
 Argument | Description | Default
 --- | --- | ---
-`--expt-name` | The name of the experiment | N/A
-`--train-trees-path` | Path to training trees | N/A
-`--train-elmo-embeddings-path` | Path to training trees | N/A
-`--dev-trees-path` | Path to development trees | N/A
-`--dev-elmo-embeddings-path` | Path to development trees | N/A
+`--experiment-directory` | Path to the directory for this experiment | N/A
+`--no-elmo` | Whether to not use ELMo word embeddings | False
+`--path-to-python` | Path to a Python installation with AllenNLP | "python3"
 `--numpy-seed` | NumPy random seed | Random
 `--word-embedding-dim` | Dimension of the learned word embeddings | 100
 `--lstm-layers` | Number of bidirectional LSTM layers | 2
@@ -34,6 +31,7 @@ Argument | Description | Default
 `--epochs` | Number of training epochs | No limit
 `--checks-per-epoch` | Number of development evaluations per epoch | 4
 
+The directory specified via `--experiment-directory` must exist and contain train and dev parse trees in files named `train_trees.txt` and `dev_trees.txt` respectively.
 
 Any of the DyNet command line options can also be specified.
 
