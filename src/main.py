@@ -611,6 +611,7 @@ def parse_trees_to_string_lines(trees):
 
 
 def train_on_parses(args):
+    args.model_path_base = os.path.join(args.expt_name, 'model')
     train_parses = load_parses(os.path.join(args.expt_name, 'train_trees.txt'))
     train_indices = list(range(len(train_parses)))
     if not args.no_elmo:
@@ -1082,11 +1083,6 @@ def main():
         subparser.add_argument(arg)
     subparser.set_defaults(callback=train_on_parses)
     subparser.add_argument("--expt-name", required=True)
-    subparser.add_argument("--model-path-base", required=True)
-    subparser.add_argument("--embedding-path", required=True)
-    subparser.add_argument("--num-samples", required=True)
-    subparser.add_argument("--additional-train-trees", default=None)
-    subparser.add_argument("--additional-train-trees-elmo-embeddings", default=None)
     subparser.add_argument("--num-epochs-per-check", default=1)
 
     subparser.add_argument("--numpy-seed", type=int)
