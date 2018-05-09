@@ -106,13 +106,6 @@ def load_or_create_model(args, parses_for_vocab):
         word_vocab.freeze()
         label_vocab.freeze()
 
-        def print_vocabulary(name, vocab):
-            special = {parse.START, parse.STOP, parse.UNK}
-            print("{} ({:,}): {}".format(
-                name, vocab.size,
-                sorted(value for value in vocab.values if value in special) +
-                sorted(value for value in vocab.values if value not in special)))
-
         print("Initializing model...")
         model = dy.ParameterCollection()
         parser = parse.Parser(
@@ -289,37 +282,37 @@ def run_test_qbank(args):
 def compute_elmo_embeddings(tokenized_lines, expt_name, path_to_python):
     if not os.path.exists(expt_name):
         os.mkdir(expt_name)
-
-    tokenized_sentences_file_path = expt_name + '/tokenized_sentences.txt'
-
-    normalized_lines = []
-    for line in tokenized_lines:
-        cleaned_line = ''
-        for word in line.split():
-            if word == '-LRB-' or word == 'LRB':
-                word = '('
-            elif word == '-RRB-' or word == 'RRB':
-                word = ')'
-            elif word == '-LCB-' or word == 'LCB':
-                word = '{'
-            elif word == '-RCB-' or word == 'RCB':
-                word = '}'
-            elif word == '`':
-                word = "'"
-            elif word == "''":
-                word = '"'
-
-            if '\\' in word:
-                print('-' * 100)
-                print(word)
-                print('-' * 100)
-            cleaned_line += word + ' '
-        normalized_lines.append(cleaned_line.strip())
-    with open(tokenized_sentences_file_path, 'w') as f:
-        f.write('\n'.join(normalized_lines))
     elmo_embeddings_file_path = expt_name + '/elmo.hdf5'
     print(elmo_embeddings_file_path)
     if not os.path.exists(elmo_embeddings_file_path):
+        tokenized_sentences_file_path = expt_name + '/tokenized_sentences.txt'
+
+        normalized_lines = []
+        for line in tokenized_lines:
+            cleaned_line = ''
+            for word in line.split():
+                if word == '-LRB-' or word == 'LRB':
+                    word = '('
+                elif word == '-RRB-' or word == 'RRB':
+                    word = ')'
+                elif word == '-LCB-' or word == 'LCB':
+                    word = '{'
+                elif word == '-RCB-' or word == 'RCB':
+                    word = '}'
+                elif word == '`':
+                    word = "'"
+                elif word == "''":
+                    word = '"'
+
+                if '\\' in word:
+                    print('-' * 100)
+                    print(word)
+                    print('-' * 100)
+                cleaned_line += word + ' '
+            normalized_lines.append(cleaned_line.strip())
+        with open(tokenized_sentences_file_path, 'w') as f:
+            f.write('\n'.join(normalized_lines))
+
         generate_elmo_vectors = '{} -m allennlp.run elmo {} {} --all'.format(
             path_to_python,
             tokenized_sentences_file_path,

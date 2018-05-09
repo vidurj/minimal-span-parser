@@ -72,7 +72,8 @@ def evalb(evalb_dir,
         output_path,
     )
     return_code = os.system(command)
-    assert return_code == 0
+    if return_code != 0:
+        print('evalb failed with return code {}'.format(return_code))
 
     fscore = FScore(math.nan, math.nan, math.nan)
     with open(output_path) as infile:
